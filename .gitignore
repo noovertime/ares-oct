@@ -1,0 +1,46 @@
+# Python 환경 기본 파일 무시
+# ----------------------------------------------------
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+build/
+develop-eggs/
+dist/
+*.egg-info/
+.coverage
+
+# Jupyter/IPython 파일
+# ----------------------------------------------------
+.ipynb_checkpoints
+.jupyter/
+.vscode/
+
+# PyCharm/JetBrains IDE 파일 무시
+# ----------------------------------------------------
+# Project specific settings
+.idea/
+.idea/*
+!/.idea/workspace.xml
+!/.idea/tasks.xml
+!/.idea/shelf/
+!/.idea/csv-plugin.xml
+!/.idea/sonarlint
+
+# Python toolchain cache directories
+.pytest_cache/
+.tox/
+.mypy_cache/
+
+# 학습 데이터 및 모델 파일 무시
+# ----------------------------------------------------
+# ARES 프로젝트 모델 폴더 (가장 중요)
+/model/
+
+# HuggingFace Cache (모델 로드/토크나이저 캐시)
+.cache/
+.huggingface/
