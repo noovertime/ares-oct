@@ -189,6 +189,33 @@ def load_gold_labels_map(filepath: str, gold_field_mapping: Dict[str, str]) -> D
     return gold_map
 
 
+def cleanup_evaluation_data():
+    """
+    config에 정의된 PPI 출력 디렉토리와 최종 보고서 디렉토리 내의 모든 파일을 삭제합니다.
+    """
+
+    dirs_to_clean = [config.DATA_OUT_DIR, config.DATA_REPORT_DIR]
+
+    print("\n>> 평가 및 보고서 출력 파일 정리 시작...")
+
+    for target_dir in dirs_to_clean:
+        if os.path.isdir(target_dir):
+            files_deleted = 0
+            # 디렉토리 내의 모든 항목을 순회합니다.
+            for filename in os.listdir(target_dir):
+                file_path = os.path.join(target_dir, filename)
+                try:
+                    if os.path.isfile(file_path):
+                        os.remove(file_path)
+                        files_deleted += 1
+                except Exception as e:
+                    print(f"   [ERROR] 파일 삭제 실패: {file_path} - {e}")
+
+            print(f"   [SUCCESS] '{target_dir}' 디렉토리에서 총 {files_deleted}개 파일 삭제 완료.")
+        else:
+            print(f"   [INFO] 디렉토리 '{target_dir}'가 존재하지 않아 정리할 파일이 없습니다.")
+
+
 # ===================================================================
 # 4. 메인 실행 함수 (평가 및 보고서 생성 통합)
 # ===================================================================
@@ -320,3 +347,4 @@ def run_ares_pipeline():
 
 if __name__ == "__main__":
     run_ares_pipeline()
+    #cleanup_evaluation_data()

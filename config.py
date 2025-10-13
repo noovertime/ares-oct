@@ -15,8 +15,8 @@ PREPARE_FILE_NAME = "qna_1_train.jsonl"
 PREPARE_OUT_PREFIX = "random_sample"
 
 # ARES 평가 관련 데이터
-#DATA_DIR = DATA_ROOT + "/set1"
-DATA_DIR = DATA_ROOT + "/set3"
+DATA_DIR = DATA_ROOT + "/set1"
+#DATA_DIR = DATA_ROOT + "/set3"
 # ARES 평가 프로세스 경로
 DATA_IN_DIR = os.path.join(DATA_DIR, "in")        # 1. 배치 평가 입력 (QCA 트리플)
 DATA_OUT_DIR = os.path.join(DATA_DIR, "out")      # 2. 배치 평가 출력 (PPI *.jsonl 파일)
