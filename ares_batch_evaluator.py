@@ -8,7 +8,7 @@ from tqdm import tqdm
 import logging
 
 import config
-import ares_batch_report_util  # 유틸리티 파일 임포트
+import ares_batch_report_util
 
 # ===================================================================
 # 0. 전역 상수 및 환경 설정
@@ -32,6 +32,13 @@ FOLDER_MAPPING = {
     'contextrelevance': 'context_relevance',
     'answerfaithfulness': 'answer_faithfulness',
     'answerrelevance': 'answer_relevance'
+}
+
+# 골든 라벨 필드 명칭 정의
+GOLD_LABEL_FIELDS = {
+    'contextrelevance': 'L_CR',
+    'answerfaithfulness': 'L_AF',
+    'answerrelevance': 'L_AR'
 }
 
 
@@ -103,7 +110,6 @@ def load_ares_judges() -> Tuple[AutoTokenizer, Dict[str, AutoModelForSequenceCla
     return tokenizer, judges
 
 
-# *** 함수 인자 이름 수정: tokenizer -> tokenizer_obj ***
 def evaluate_triple(tokenizer_obj: AutoTokenizer, judges: Dict[str, AutoModelForSequenceClassification],
                     query: str, context: str, answer: str) -> Dict[str, int]:
     """하나의 Q-C-A 쌍에 대해 3가지 ARES 점수 (0 또는 1)를 계산합니다."""
@@ -118,7 +124,7 @@ def evaluate_triple(tokenizer_obj: AutoTokenizer, judges: Dict[str, AutoModelFor
 
     with torch.no_grad():
         for name, (text_a, text_b, model) in judge_inputs.items():
-            # 1. 입력 토큰화: tokenizer_obj 사용으로 변경
+            # 1. 입력 토큰화
             inputs = tokenizer_obj(
                 text_a, text_b,
                 return_tensors="pt",
@@ -134,6 +140,53 @@ def evaluate_triple(tokenizer_obj: AutoTokenizer, judges: Dict[str, AutoModelFor
             results[name] = prediction
 
     return results
+
+
+def load_gold_labels_map(filepath: str, gold_field_mapping: Dict[str, str]) -> Dict[
+    Tuple[str, str, str], Dict[str, Any]]:
+    """
+    골든 라벨 파일을 로드하여 (q, c, a)의 튜플을 키로 하는 맵을 생성합니다.
+    """
+    gold_map = {}
+    print(f"\n>> 골든 라벨 로딩 시작: {filepath}")
+
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            for i, line in enumerate(f):
+                try:
+                    data = json.loads(line.strip())
+
+                    # Q, C, A를 정규화된 튜플 키로 사용
+                    q = data.get('q', '').strip()
+                    c = data.get('c', '').strip()
+                    a = data.get('a', '').strip()
+
+                    if not all([q, c, a]):
+                        print(f"[WARN] 골든 라벨 파일 {filepath}의 {i + 1}번째 줄: QCA 중 누락. 건너뜀.")
+                        continue
+
+                    key = (q, c, a)
+
+                    labels = {}
+                    # 기계 예측 키를 이용해 골든 라벨 필드(L_CR, L_AF, L_AR)를 찾습니다.
+                    for machine_key, gold_key_name in gold_field_mapping.items():
+                        if gold_key_name in data:
+                            labels[gold_key_name] = data[gold_key_name]
+                        else:
+                            labels[gold_key_name] = -1
+
+                    gold_map[key] = labels
+
+                except json.JSONDecodeError:
+                    print(f"[WARN] 골든 라벨 파일 {filepath}의 {i + 1}번째 줄: JSON 오류. 건너뜀.")
+                    continue
+
+    except FileNotFoundError:
+        print(f"[ERROR] 골든 라벨 파일 {filepath}을 찾을 수 없습니다.")
+        return {}
+
+    print(f">> 골든 라벨 로딩 완료. 총 {len(gold_map)}개 샘플.")
+    return gold_map
 
 
 # ===================================================================
@@ -152,16 +205,28 @@ def run_ares_pipeline():
 
     os.makedirs(INPUT_DIR, exist_ok=True)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    os.makedirs(config.DATA_REPORT_DIR, exist_ok=True)  # 보고서 디렉토리 생성
+    os.makedirs(config.DATA_REPORT_DIR, exist_ok=True)
     print(f"\n[SETUP] QCA 입력 디렉토리: {INPUT_DIR}, PPI 출력 디렉토리: {OUTPUT_DIR}")
 
-    # load_ares_judges 호출
+    # 1-1. 모델 로드
     try:
         tokenizer, judges = load_ares_judges()
     except RuntimeError as e:
         print(f"\n[FATAL ERROR] ARES 심사관 시스템 초기화 실패: {e}")
         return
 
+    # 1-2. 골든 라벨 로드 (PPI 보정을 위해)
+    GOLD_LABEL_PATH = os.path.join(config.DATA_GOLDEN_DIR, config.DATA_SET1_GOLDEN_FILE_NAME)
+    gold_label_map = load_gold_labels_map(GOLD_LABEL_PATH, GOLD_LABEL_FIELDS)
+
+    # PPI 보정 활성화 여부 확인 및 검증
+    if not gold_label_map:
+        print("\n[FATAL ERROR] PPI 보정을 위한 골든 라벨 데이터가 없습니다. 파이프라인을 중단합니다.")
+        return
+
+    ppi_correction_active = True
+
+    # 1-3. 입력 파일 목록 검색 및 처리 루프
     input_files = [
         os.path.join(INPUT_DIR, f)
         for f in os.listdir(INPUT_DIR)
@@ -195,22 +260,29 @@ def run_ares_pipeline():
                 try:
                     data = json.loads(line.strip())
 
-                    query = data.get('q')
-                    context = data.get('c')
-                    answer = data.get('a')
+                    query = data.get('q', '').strip()
+                    context = data.get('c', '').strip()
+                    answer = data.get('a', '').strip()
 
                     if not all([query, context, answer]):
                         print(f"[SKIP] 데이터 형식 오류 (Q, C, A 중 누락) - 파일: {file_base_name}, 라인: {line.strip()[:50]}...")
                         continue
 
-                    # evaluate_triple 호출 시 인자 이름 변경 적용
+                    # 1. ARES 예측 수행
                     scores = evaluate_triple(tokenizer, judges, query, context, answer)
+
                     data.update(scores)
+
+                    # 2. 골든 라벨 추가 (PPI 보정을 위한 핵심 데이터)
+                    gold_key = (query, context, answer)
+                    if gold_key in gold_label_map:
+                        data.update(gold_label_map[gold_key])
+
                     all_results_for_file.append(data)
                     total_successful_evals += 1
 
                 except json.JSONDecodeError:
-                    print(f"[SKIP] JSON 구문 오류 발생 - 파일: {file_base_name}, 라인 건너뜀: {line.strip()[:50]}...")
+                    print(f"[SKIP] JSON 구문 오류 - 파일: {file_base_name}. 라인 건너뜀.")
                 except Exception as e:
                     print(f"[ERROR] 처리 중 알 수 없는 오류 발생: {e} - 파일: {file_base_name}. 라인 건너뜀.")
 
@@ -242,8 +314,8 @@ def run_ares_pipeline():
 
     # --- 2. 통계 보고서 생성 단계 (유틸리티 함수 호출) ---
     print("\n>> ARES 통계 보고서 생성 시작")
-    ares_batch_report_util.run_summary_generation_pipeline()
-    # (run_summary_generation_pipeline 내에서 최종 완료 로그 출력)
+    # ppi_correction_active = True 이며, 세 번째 인수는 이제 사용하지 않음
+    ares_batch_report_util.run_summary_generation_pipeline(True, GOLD_LABEL_FIELDS)
 
 
 if __name__ == "__main__":
