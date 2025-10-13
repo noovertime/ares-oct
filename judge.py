@@ -3,6 +3,7 @@ from transformers import AutoTokenizer, DistilBertForSequenceClassification
 import os
 import json
 import time
+import config
 
 # ===================================================================
 # 0. 전역 상수 설정
@@ -11,7 +12,7 @@ import time
 # CPU 환경 설정 (PC 환경이므로 GPU 사용하지 않음)
 DEVICE = torch.device("cpu")
 MAX_LENGTH = 128  # 학습 시 사용했던 최대 길이 유지
-MODEL_NAME = "monologg/distilkobert"  # 토크나이저 fallback용 원본 모델 이름
+MODEL_NAME = config.MODEL_NAME  # 토크나이저 fallback용 원본 모델 이름
 
 
 class ARESJudgeSystem:
@@ -142,7 +143,7 @@ class ARESJudgeSystem:
 if __name__ == "__main__":
     # --- 1. 경로 설정 (PC 환경에 맞게 반드시 수정하세요) ---
     # 다운로드한 모델 폴더(answer_faithfulness 등)들이 모여있는 상위 디렉터리 경로입니다.
-    MODEL_DIR_BASE = r"C:\dev\workspaces\pycharm\ares-oct\model"
+    MODEL_DIR_BASE = config.MODEL_DIR
 
     # --- 2. 심사관 시스템 초기화 ---
     try:

@@ -1,272 +1,250 @@
+import torch
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import os
 import json
 import time
-import numpy as np
-from typing import Dict, List, Any, Tuple # <-- Tuple 추가
-from scipy.stats import binom, norm
-from scipy.optimize import brentq
+from typing import Dict, Any, List, Tuple
+from tqdm import tqdm
+import logging
+
+import config
+import ares_batch_report_util  # 유틸리티 파일 임포트
+
+# ===================================================================
+# 0. 전역 상수 및 환경 설정
+# ===================================================================
+
+# 1. Transformers 경고 메시지 비활성화
+logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
+logging.getLogger("transformers.modeling_utils").setLevel(logging.ERROR)
+
+# 경로 설정: config 파일에서 불러오기
+MODEL_DIR_BASE = config.MODEL_DIR
+MODEL_NAME = config.MODEL_NAME
+
+# CPU 환경 설정
+DEVICE = torch.device("cpu")
+MAX_LENGTH = 128
+
+# ARES 심사관 타입 및 폴더 매핑
+JUDGE_TYPES = ['contextrelevance', 'answerfaithfulness', 'answerrelevance']
+FOLDER_MAPPING = {
+    'contextrelevance': 'context_relevance',
+    'answerfaithfulness': 'answer_faithfulness',
+    'answerrelevance': 'answer_relevance'
+}
 
 
 # ===================================================================
-# 0. 전역 상수 및 설정
+# 1. ARES 평가 및 유틸리티 함수
 # ===================================================================
 
-INPUT_DIR = "./out"  # PPI 파일 (report_*.jsonl)이 저장된 디렉토리
-OUTPUT_DIR = "./report"  # 최종 통계 보고서가 저장될 디렉토리
-CI_ALPHA = 0.05  # 95% 신뢰구간 (alpha=0.05)
+def _find_model_path(judge_type: str) -> str:
+    """고정된 심사관 이름 폴더 경로를 반환합니다."""
+    target_folder = FOLDER_MAPPING.get(judge_type.lower())
+
+    if not target_folder:
+        raise ValueError(f"정의되지 않은 심사관 타입: {judge_type}")
+
+    model_path = os.path.join(MODEL_DIR_BASE, target_folder)
+
+    if not os.path.isdir(model_path):
+        raise FileNotFoundError(f"모델 폴더를 찾을 수 없습니다: {model_path}")
+
+    return model_path
 
 
-# ===================================================================
-# 1. 통계 계산 유틸리티 (PPI 로직 기반)
-# ===================================================================
-def calculate_binomial_ci(n: int, k: int, alpha: float = 0.05) -> tuple[float, float]:
-    """
-    ppi.py의 binomial_iid 로직을 사용하여 95% 이항 신뢰구간 (Clopper-Pearson 근사)을 계산합니다.
+def load_ares_judges() -> Tuple[AutoTokenizer, Dict[str, AutoModelForSequenceClassification]]:
+    """CR, AF, AR 세 가지 심사관 모델과 토크나이저를 로드합니다."""
+    print("\n>> ARES 심사관 로딩 시작 (CPU 환경)...")
+    tokenizer = None
+    judges = {}
 
-    Args:
-        n (int): 총 시행 횟수 (Total Samples)
-        k (int): 성공 횟수 (Success Count)
-        alpha (float): 유의 수준 (기본값 0.05 for 95% CI)
-
-    Returns:
-        Tuple[float, float]: (하한, 상한)
-    """
-    if n == 0:
-        return 0.0, 1.0  # 샘플 없으면 신뢰구간 정의 불가능
-
-    # muhat (관측된 성공률)
-    muhat = k / n
-
-    # 하한(l) 계산을 위한 함수: invert_lower_tail
-    # (ppi.py의 invert_lower_tail 로직)
-    def invert_lower_tail(mu):
-        return binom.cdf(k, n, mu) - (1 - alpha / 2)
-
-    # 상한(u) 계산을 위한 함수: invert_upper_tail
-    # (ppi.py의 invert_upper_tail 로직)
-    def invert_upper_tail(mu):
-        return binom.cdf(k, n, mu) - (alpha / 2)
-
-    # 1. 상한 (u) 계산
-    # k == n (모두 성공)이면 상한은 1.0
-    if k == n:
-        u = 1.0
-    else:
-        # brentq를 사용하여 [muhat, 1.0] 범위에서 근을 찾습니다.
-        try:
-            u = brentq(invert_upper_tail, muhat, 1.0)
-        except ValueError:
-            u = 1.0
-
-            # 2. 하한 (l) 계산
-    # k == 0 (모두 실패)이면 하한은 0.0
-    if k == 0:
-        l = 0.0
-    else:
-        # brentq를 사용하여 [0.0, muhat] 범위에서 근을 찾습니다.
-        try:
-            l = brentq(invert_lower_tail, 0.0, muhat)
-        except ValueError:
-            l = 0.0
-
-    return l, u
-
-
-
-def analyze_ppi_file(filepath: str) -> Dict[str, Any]:
-    """
-    단일 PPI 파일을 읽어 CR, AF, AR의 평균 및 신뢰구간을 계산합니다.
-    """
-    model_name_raw = os.path.basename(filepath)
-    all_scores: Dict[str, List[int]] = {
-        'contextrelevance': [],
-        'answerfaithfulness': [],
-        'answerrelevance': []
-    }
-
-    # 파일명에서 모델명 추출 (예: 'report_gpt-rag.jsonl' -> 'gpt-rag')
-    model_name = model_name_raw.replace("report_", "").replace(".jsonl", "")
-
+    # 1. 토크나이저 초기화
     try:
-        with open(filepath, 'r', encoding='utf-8') as f:
-            for line in f:
-                try:
-                    data = json.loads(line.strip())
-                    for key in all_scores.keys():
-                        if key in data:
-                            all_scores[key].append(data[key])
-                except json.JSONDecodeError:
-                    # 파일명과 라인 정보 출력 추가 (디버깅 용이)
-                    print(f"[WARN] 파일 {model_name_raw}에서 JSON 디코딩 오류 발생. 라인 건너뜀.")
-                    continue
-    except FileNotFoundError:
-        print(f"[ERROR] 파일 {filepath}을 찾을 수 없습니다. 건너뜁니다.")
-        return None
+        cr_path = _find_model_path('contextrelevance')
+        tokenizer = AutoTokenizer.from_pretrained(cr_path, trust_remote_code=True)
+        print(f"   [INFO] 토크나이저 로드 성공 (저장된 경로에서).")
+    except Exception as e:
+        print(f"   [WARN] 저장 경로에서 토크나이저 로드 실패. 원본 모델 ({MODEL_NAME}) 로드 시도.")
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
+        except Exception as fallback_e:
+            print(f"   [FATAL] 토크나이저 로드 최종 실패: {fallback_e}")
+            raise fallback_e
 
-    total_n = len(all_scores['contextrelevance'])
-    if total_n == 0:
-        print(f"[WARN] 파일 {model_name}에 유효한 샘플이 없습니다.")
-        return None
+    # DistilBERT 호환성을 위해 토크나이저의 'token_type_ids' 생성을 비활성화합니다.
+    tokenizer.model_input_names = [
+        name for name in tokenizer.model_input_names if name != 'token_type_ids'
+    ]
+    print("   [INFO] DistilBERT 호환성을 위해 토크나이저의 'token_type_ids' 생성을 비활성화했습니다.")
 
-    summary = {
-        'model_name': model_name,
-        'n': total_n
+    # 2. 모델 로드 (AutoModelForSequenceClassification 사용)
+    for judge_type in JUDGE_TYPES:
+        try:
+            model_path = _find_model_path(judge_type)
+            model = AutoModelForSequenceClassification.from_pretrained(
+                model_path,
+                num_labels=2,
+                trust_remote_code=True
+            )
+            model.to(DEVICE)
+            model.eval()
+            judges[judge_type] = model
+            print(f"   [SUCCESS] {judge_type.upper()} Judge 로드 완료.")
+
+        except Exception as e:
+            print(f"   [ERROR] {judge_type.upper()} Judge 로드 실패: {e}. 이 모델은 건너뜁니다.")
+
+    if len(judges) != 3:
+        raise RuntimeError(f"총 {len(judges)}개만 로드됨. ARES 평가를 위해 3개 모델이 모두 필요합니다.")
+
+    print(f">> ARES 심사관 로드 완료. 총 {len(judges)}개 활성화.")
+    return tokenizer, judges
+
+
+# *** 함수 인자 이름 수정: tokenizer -> tokenizer_obj ***
+def evaluate_triple(tokenizer_obj: AutoTokenizer, judges: Dict[str, AutoModelForSequenceClassification],
+                    query: str, context: str, answer: str) -> Dict[str, int]:
+    """하나의 Q-C-A 쌍에 대해 3가지 ARES 점수 (0 또는 1)를 계산합니다."""
+
+    results = {}
+
+    judge_inputs = {
+        'contextrelevance': (query, context, judges['contextrelevance']),
+        'answerfaithfulness': (context, answer, judges['answerfaithfulness']),
+        'answerrelevance': (query, answer, judges['answerrelevance'])
     }
 
-    overall_scores = []
+    with torch.no_grad():
+        for name, (text_a, text_b, model) in judge_inputs.items():
+            # 1. 입력 토큰화: tokenizer_obj 사용으로 변경
+            inputs = tokenizer_obj(
+                text_a, text_b,
+                return_tensors="pt",
+                truncation=True,
+                padding='max_length',
+                max_length=MAX_LENGTH
+            ).to(DEVICE)
 
-    for axis in all_scores.keys():
-        scores = all_scores[axis]
-        success_k = sum(scores)
+            # 2. 예측 수행 및 결과 산출
+            outputs = model(**inputs)
+            prediction = torch.argmax(outputs.logits, dim=1).item()
 
-        # 신뢰구간 (하한, 상한) 계산
-        l, u = calculate_binomial_ci(total_n, success_k)
+            results[name] = prediction
 
-        mean_score = success_k / total_n
-
-        # 신뢰구간의 마진 (± CI) 계산
-        # margin = (상한 - 하한) / 2
-        margin = (u - l) / 2
-
-        summary[axis] = {
-            'mean': round(mean_score, 2),
-            'ci': round(margin, 3)  # 소수점 셋째 자리까지 반올림
-        }
-        overall_scores.append(mean_score)
-
-    # 종합 점수 계산 (3축 평균)
-    summary['overall'] = round(sum(overall_scores) / 3, 2)
-
-    return summary
+    return results
 
 
 # ===================================================================
-# 2. 보고서 생성 및 출력
+# 4. 메인 실행 함수 (평가 및 보고서 생성 통합)
 # ===================================================================
 
-def generate_summary_report(model_summaries: List[Dict[str, Any]]):
-    # (내용 유지)
+def run_ares_pipeline():
     """
-    분석된 모델 요약을 바탕으로 최종 Markdown 형식의 보고서를 생성합니다.
+    ARES 전체 파이프라인 실행: PPI 파일 생성 후 통계 보고서 생성까지 자동 실행합니다.
     """
 
-    if not model_summaries:
-        return "[WARN] 분석할 모델 데이터가 없어 보고서를 생성할 수 없습니다."
+    # --- 1. PPI 파일 생성 단계 ---
 
-    current_time = time.strftime("%Y-%m-%d %H:%M:%S")
-    report_name = "RAG 자동 평가 결과 (ARES PPI 요약)"
+    INPUT_DIR = config.DATA_IN_DIR
+    OUTPUT_DIR = config.DATA_OUT_DIR
 
-    # 모델 이름 정렬 (보고서 가독성 향상)
-    model_summaries.sort(key=lambda x: x['overall'], reverse=True)
-
-    # 템플릿 작성
-    report_content = f"""
-# 🧭 ARES 자동 평가 결과 보고서 (Prediction-Powered Inference 요약)
-
-프로젝트명: ARES 심사관 로컬 배치 평가
-평가 프레임워크: Stanford ARES (PPI 기반 이항 신뢰구간)
-평가 일자: {current_time}
-평가 대상 모델: {', '.join([s['model_name'] for s in model_summaries])}
-
-### 1️⃣ 평가 개요
-
-| 평가 축 | 미세부 설명 |
-| :--- | :--- |
-| **Context Relevance (CR)** | 검색된 문서가 질문과 얼마나 관련 있는가 (문맥 적합성) |
-| **Answer Faithfulness (AF)** | 생성된 답변이 검색 문서 내용에 충실한가 (응답 충실도) |
-| **Answer Relevance (AR)** | 답변이 질문에 직접적이고 구체적인가 (응답 적절성) |
-
-### 2️⃣ 자동 평가 점수 및 신뢰구간 요약 (95% CI)
-
-| 모델명 | CR (±95% CI) | AF (±95% CI) | AR (±95% CI) | 종합 점수 | 총 샘플 수 |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-"""
-
-    # 데이터 행 추가
-    for summary in model_summaries:
-        cr_str = f"{summary['contextrelevance']['mean']:.2f} ±{summary['contextrelevance']['ci']:.3f}"
-        af_str = f"{summary['answerfaithfulness']['mean']:.2f} ±{summary['answerfaithfulness']['ci']:.3f}"
-        ar_str = f"{summary['answerrelevance']['mean']:.2f} ±{summary['answerrelevance']['ci']:.3f}"
-
-        report_content += (
-            f"| **{summary['model_name']}** "
-            f"| {cr_str} "
-            f"| {af_str} "
-            f"| {ar_str} "
-            f"| **{summary['overall']:.2f}** "
-            f"| {summary['n']} |\n"
-        )
-
-    report_content += """
----
-### 해석 및 결론 (자동 생성)
-
-* **PPI 적용:** ARES의 PPI(Prediction-Powered Inference) 방법론을 기반으로, 각 모델의 성능은 95% 신뢰구간(CI) 내에 존재한다고 통계적으로 추정됩니다.
-* **통계적 신뢰도:** **신뢰구간이 겹치지 않는 모델 간**에는 95% 신뢰 수준에서 통계적으로 유의미한 성능 차이가 존재합니다.
-* **평가 일관성:** 신뢰구간 폭이 좁은 모델일수록 평가 샘플에 대한 예측 일관성이 높습니다.
-"""
-
-    return report_content
-
-
-# ===================================================================
-# 3. 메인 실행 로직
-# ===================================================================
-
-def run_summary_generation():
-    """
-    메인 함수: ./out 디렉토리의 PPI 파일을 분석하고 요약 보고서를 생성합니다.
-    """
-    print(f"\n>> ARES 통계 보고서 생성 시작")
-
-    # 1. 디렉토리 구조 확인
+    os.makedirs(INPUT_DIR, exist_ok=True)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    if not os.path.isdir(INPUT_DIR):
-        print(f"[FATAL] 입력 디렉토리 {INPUT_DIR}을 찾을 수 없습니다. PPI 파일 생성 단계를 먼저 완료하세요.")
+    os.makedirs(config.DATA_REPORT_DIR, exist_ok=True)  # 보고서 디렉토리 생성
+    print(f"\n[SETUP] QCA 입력 디렉토리: {INPUT_DIR}, PPI 출력 디렉토리: {OUTPUT_DIR}")
+
+    # load_ares_judges 호출
+    try:
+        tokenizer, judges = load_ares_judges()
+    except RuntimeError as e:
+        print(f"\n[FATAL ERROR] ARES 심사관 시스템 초기화 실패: {e}")
         return
 
-    # 2. 입력 PPI 파일 목록 검색
-    ppi_files = [
+    input_files = [
         os.path.join(INPUT_DIR, f)
         for f in os.listdir(INPUT_DIR)
-        if f.endswith('.jsonl') and f.startswith('report_')
+        if f.endswith('.jsonl')
     ]
 
-    if not ppi_files:
-        print(f"[WARN] {INPUT_DIR} 디렉토리에서 분석할 'report_*.jsonl' PPI 파일을 찾을 수 없습니다.")
+    if not input_files:
+        print(f"\n[WARN] QCA `.jsonl` 파일을 찾을 수 없습니다. 평가를 건너뜁니다.")
         return
 
-    print(f"[INFO] 총 {len(ppi_files)}개 모델의 PPI 파일을 분석합니다.")
+    print(f"\n[INFO] 총 {len(input_files)}개의 `.jsonl` 파일을 평가합니다.")
 
-    model_summaries = []
+    total_processed_samples = 0
+    total_successful_evals = 0
+    full_start_time = time.time()
 
-    # 3. 파일별 분석 수행
-    for file_path in ppi_files:
-        summary = analyze_ppi_file(file_path)
-        if summary:
-            model_summaries.append(summary)
-            print(f"   [SUCCESS] 모델 '{summary['model_name']}' 분석 완료 (샘플 수: {summary['n']}개).")
+    for file_path in input_files:
+        start_time = time.time()
+        file_base_name = os.path.basename(file_path).replace('.jsonl', '')
+        all_results_for_file = []
+        total_samples_in_file = 0
 
-    if not model_summaries:
-        print("[WARN] 분석 가능한 모델 데이터가 없어 보고서 생성을 건너뜁니다.")
-        return
+        print(f"\n--- 파일 평가 시작: {file_base_name} ---")
 
-    # 4. 최종 보고서 생성
-    report_content = generate_summary_report(model_summaries)
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+            total_samples_in_file = len(lines)
+            total_processed_samples += total_samples_in_file
 
-    # 5. 파일 저장
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    output_filename = f"summary_report_{timestamp}.md"
-    output_path = os.path.join(OUTPUT_DIR, output_filename)
+            for line in tqdm(lines, desc=f"평가 중 [{file_base_name}]"):
+                try:
+                    data = json.loads(line.strip())
 
-    with open(output_path, 'w', encoding='utf-8') as outfile:
-        outfile.write(report_content)
+                    query = data.get('q')
+                    context = data.get('c')
+                    answer = data.get('a')
 
-    print("\n\n=============== 보고서 생성 완료 ===============")
-    print(f"분석된 모델 수: {len(model_summaries)}개")
-    print(f"**통계 보고서 저장 경로:** {output_path}")
-    print("==============================================")
+                    if not all([query, context, answer]):
+                        print(f"[SKIP] 데이터 형식 오류 (Q, C, A 중 누락) - 파일: {file_base_name}, 라인: {line.strip()[:50]}...")
+                        continue
+
+                    # evaluate_triple 호출 시 인자 이름 변경 적용
+                    scores = evaluate_triple(tokenizer, judges, query, context, answer)
+                    data.update(scores)
+                    all_results_for_file.append(data)
+                    total_successful_evals += 1
+
+                except json.JSONDecodeError:
+                    print(f"[SKIP] JSON 구문 오류 발생 - 파일: {file_base_name}, 라인 건너뜀: {line.strip()[:50]}...")
+                except Exception as e:
+                    print(f"[ERROR] 처리 중 알 수 없는 오류 발생: {e} - 파일: {file_base_name}. 라인 건너뜀.")
+
+        end_time = time.time()
+
+        processed_count_in_file = len(all_results_for_file)
+        if processed_count_in_file > 0:
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            output_filename = f"{file_base_name}_{timestamp}.jsonl"
+            output_path = os.path.join(OUTPUT_DIR, output_filename)
+
+            with open(output_path, 'w', encoding='utf-8') as outfile:
+                for result in all_results_for_file:
+                    outfile.write(json.dumps(result, ensure_ascii=False) + '\n')
+
+            elapsed_time = end_time - start_time
+            print(f"\n--- {file_base_name} PPI 생성 완료 ---")
+            print(f"  평가 성공 샘플 수: {processed_count_in_file} / {total_samples_in_file}개")
+            print(f"  소요 시간: {elapsed_time:.2f}초")
+            print(f"  저장 경로: {output_path}")
+
+    full_end_time = time.time()
+    full_elapsed_time = full_end_time - full_start_time
+
+    print("\n\n=============== PPI 생성 최종 요약 ===============")
+    print(f"총 PPI 생성 샘플 수: {total_successful_evals}개")
+    print(f"총 소요 시간: {full_elapsed_time:.2f}초")
+    print("==================================================")
+
+    # --- 2. 통계 보고서 생성 단계 (유틸리티 함수 호출) ---
+    print("\n>> ARES 통계 보고서 생성 시작")
+    ares_batch_report_util.run_summary_generation_pipeline()
+    # (run_summary_generation_pipeline 내에서 최종 완료 로그 출력)
 
 
 if __name__ == "__main__":
-    run_summary_generation()
+    run_ares_pipeline()
