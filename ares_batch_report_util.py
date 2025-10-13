@@ -262,7 +262,7 @@ def run_summary_generation_pipeline(ppi_correction_active: bool, gold_fields: Di
     report_content = generate_summary_report(model_summaries)
 
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    output_filename = f"summary_report_ppi_{timestamp}.md"
+    output_filename = f"report_{timestamp}.md"
     output_path = os.path.join(OUTPUT_DIR_SUM, output_filename)
 
     with open(output_path, 'w', encoding='utf-8') as outfile:

@@ -216,7 +216,7 @@ def run_ares_pipeline():
         return
 
     # 1-2. 골든 라벨 로드 (PPI 보정을 위해)
-    GOLD_LABEL_PATH = os.path.join(config.DATA_GOLDEN_DIR, config.DATA_SET1_GOLDEN_FILE_NAME)
+    GOLD_LABEL_PATH = os.path.join(config.DATA_GOLDEN_DIR, config.DATA_GOLDEN_FILE_NAME)
     gold_label_map = load_gold_labels_map(GOLD_LABEL_PATH, GOLD_LABEL_FIELDS)
 
     # PPI 보정 활성화 여부 확인 및 검증
