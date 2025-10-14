@@ -4,6 +4,7 @@ import os
 import json
 import random
 import math
+import uuid
 from typing import List, Dict, Any
 
 # config.py가 현재 디렉토리에 있다고 가정하고 임포트합니다.
@@ -43,8 +44,6 @@ def save_data(data: List[Dict[str, Any]], file_path: str, keys_to_keep: List[str
     """데이터를 JSONL 형식으로 저장합니다."""
     full_path = os.path.join(PREPARE_DIR, file_path)
     print(f"총 {len(data)}개의 데이터를 {full_path}에 저장합니다.")
-
-    # 디렉토리가 없으면 생성 (PREPARE_DIR이 존재한다는 전제)
 
     with open(full_path, 'w', encoding='utf-8') as f:
         for item in data:
@@ -104,46 +103,62 @@ def generate_samples():
     total_count = len(raw_data)
 
     # 목표 샘플 크기 계산
-    golden_size = int(total_count * 0.05)  # 5%
-    rag_size = int(total_count * 0.30)  # 30%
+    golden_size = int(total_count * 0.05)  # 전체 데이터의 5%
+    rag_extract_size = int(total_count * 0.30)  # 전체 데이터의 30%를 RAG로 추출
 
     print(f"전체 데이터 수: {total_count}개")
-    print(f"GOLDEN 샘플 목표 수 (5%): {golden_size}개")
-    print(f"RAG 샘플 목표 수 (30%): {rag_size}개")
+    print(f"RAG 초기 추출 목표 수 (30%): {rag_extract_size}개")
+    print(f"GOLDEN 샘플 목표 수 (전체의 5%): {golden_size}개")
 
-    # 2. 데이터 분할: 중복 방지를 위해 인덱스를 무작위로 섞습니다.
-    indices = list(range(total_count))
-    random.shuffle(indices)
+    # 2. RAG 샘플 1차 추출 (전체의 30%)
+    if rag_extract_size > total_count:
+        rag_extract_size = total_count
 
-    # 3. GOLDEN (5%) 데이터 추출
-    golden_indices = indices[:golden_size]
-    golden_samples = [raw_data[i] for i in golden_indices]
+    # random.sample을 사용하여 비복원 추출
+    temp_rag_samples = random.sample(raw_data, rag_extract_size)
 
-    # 4. RAG (30%) 데이터 추출 (GOLDEN과 겹치지 않음)
-    remaining_indices = indices[golden_size:]
+    # 3. RAG 데이터에 ID 부여 (ID가 golden에도 포함되도록 먼저 부여)
+    for item in temp_rag_samples:
+        # q, c, a 만 남기기 전에 모든 속성이 포함된 상태에서 id를 추가
+        item['id'] = str(uuid.uuid4())
+    print(f"RAG 초기 샘플 {len(temp_rag_samples)}개에 고유 ID(UUID)를 부여했습니다.")
 
-    rag_indices = remaining_indices[:rag_size]
-    rag_samples = [raw_data[i] for i in rag_indices]
+    # 4. GOLDEN 샘플 추출 (ID가 부여된 temp_rag_samples 내에서 전체의 5%만큼 추출)
+    if golden_size > rag_extract_size:
+        print(f"경고: GOLDEN 목표 크기({golden_size})가 RAG 추출 크기({rag_extract_size})보다 큽니다. RAG 크기에 맞춥니다.")
+        golden_size = rag_extract_size
+
+    # ID가 부여된 temp_rag_samples 내에서 golden_size 만큼을 무작위로 추출
+    golden_samples = random.sample(temp_rag_samples, golden_size)
+
+    # 5. RAG 샘플 최종 구성 (GOLDEN과 겹치지 않도록 ID를 기준으로 중복 제거)
+    # GOLDEN으로 추출된 항목의 ID를 저장
+    golden_ids = set(item['id'] for item in golden_samples)
+
+    # GOLDEN에 포함되지 않은 데이터만 최종 RAG 샘플로 구성
+    rag_samples = [item for item in temp_rag_samples if item['id'] not in golden_ids]
+
+    print(f"\n최종 RAG 샘플 수 (약 25%): {len(rag_samples)}개")
+    print(f"최종 GOLDEN 샘플 수 (5%): {len(golden_samples)}개")
 
     print("\n--- RAG 샘플 오류 주입 시작 (Negative Sampling) ---")
 
-    # 5. RAG 샘플에 오류 주입 (a 값 교환)
-    # 데이터의 3 ~ 10%를 추출해서 서로의 a 값을 바꿔주세요.
+    # 6. RAG 샘플에 오류 주입 (a 값 교환)
     # 오류 응답을 생성하기 위한 값 바꾸기
     swap_values(rag_samples, key='a', min_rate=0.03, max_rate=0.10)
 
-    # 6. RAG 샘플에 오류 주입 (c 값 교환)
-    # 데이터의 0 ~ 10%를 추출해서 서로의 c 값을 바꿔주세요.
+    # 7. RAG 샘플에 오류 주입 (c 값 교환)
     # 오류 응답을 생성하기 위한 값 바꾸기
     swap_values(rag_samples, key='c', min_rate=0.00, max_rate=0.10)
 
     print("--- RAG 샘플 오류 주입 완료 ---\n")
 
-    # 7. RAG 데이터 저장 (q, c, a 만 남김)
+    # 8. RAG 데이터 저장 (id, q, c, a 만 남김)
     rag_output_name = f"{PREPARE_OUT_PREFIX}_rag.jsonl"
-    save_data(rag_samples, rag_output_name, keys_to_keep=['q', 'c', 'a'])
+    # keys_to_keep에 'id' 포함
+    save_data(rag_samples, rag_output_name, keys_to_keep=['id', 'q', 'c', 'a'])
 
-    # 8. GOLDEN 데이터 저장 (모든 속성 유지)
+    # 9. GOLDEN 데이터 저장 (모든 속성 유지, ID 포함)
     golden_output_name = f"{PREPARE_OUT_PREFIX}_golden.jsonl"
     save_data(golden_samples, golden_output_name)
 
