@@ -9,12 +9,9 @@ from typing import List, Dict, Any
 
 # config.py가 현재 디렉토리에 있다고 가정하고 임포트합니다.
 try:
-    # 전제조건: config.py에 다음과 같은 상수가 있음
     from config import PREPARE_DIR, PREPARE_FILE_NAME, PREPARE_OUT_PREFIX
 except ImportError:
-    print("경고: config.py에서 필요한 상수를 가져올 수 없습니다.")
-    print("PREPARE_DIR, PREPARE_FILE_NAME, PREPARE_OUT_PREFIX를 임시로 설정합니다.")
-    # 테스트를 위한 임시 상수 설정
+    print("경고: config.py에서 필요한 상수를 가져올 수 없습니다. 임시 설정 사용.")
     DATA_ROOT = os.path.dirname(os.path.abspath(__file__))
     PREPARE_DIR = os.path.join(DATA_ROOT, "data", "prepare")
     PREPARE_FILE_NAME = "qna_1_train.jsonl"
@@ -33,7 +30,7 @@ def load_data(file_path: str) -> List[Dict[str, Any]]:
                 try:
                     data.append(json.loads(line.strip()))
                 except json.JSONDecodeError as e:
-                    print(f"JSON 디코딩 오류 발생: {e} - 라인: {line.strip()[:50]}...")
+                    print(f"JSON 디코딩 오류 발생: {e}")
     except FileNotFoundError:
         print(f"오류: 파일을 찾을 수 없습니다. 경로: {full_path}")
         return []
@@ -48,119 +45,147 @@ def save_data(data: List[Dict[str, Any]], file_path: str, keys_to_keep: List[str
     with open(full_path, 'w', encoding='utf-8') as f:
         for item in data:
             if keys_to_keep:
-                # 지정된 키만 남기도록 필터링합니다.
                 filtered_item = {k: v for k, v in item.items() if k in keys_to_keep}
                 f.write(json.dumps(filtered_item, ensure_ascii=False) + '\n')
             else:
-                # 모든 키를 저장합니다.
                 f.write(json.dumps(item, ensure_ascii=False) + '\n')
 
 
 def swap_values(data: List[Dict[str, Any]], key: str, min_rate: float, max_rate: float):
     """
-    데이터 리스트 내에서 특정 키(key)의 값을 무작위로 추출된 비율(min_rate ~ max_rate)만큼 서로 교환합니다.
+    데이터 리스트 내에서 특정 키(key)의 값을 무작위로 추출된 비율만큼 서로 교환합니다.
     """
     data_size = len(data)
     if data_size < 2:
-        return  # 교환할 데이터가 충분하지 않음
+        return
 
-    # 1. 교환할 비율 결정 (min_rate와 max_rate 사이의 균일 분포)
     swap_rate = random.uniform(min_rate, max_rate)
-
-    # 2. 교환할 항목 수 계산 (짝수 개로 보장하기 위해 / 2 후 * 2)
-    # 총 교환할 데이터 쌍의 수
     num_pairs = math.floor(data_size * swap_rate / 2)
-    num_items_to_swap = num_pairs * 2  # 실제 교환에 사용될 데이터 항목 수
+    num_items_to_swap = num_pairs * 2
 
     if num_items_to_swap < 2:
         return
 
-    # 3. 교환에 사용할 무작위 인덱스 추출 (비복원 추출)
     swap_indices = random.sample(range(data_size), num_items_to_swap)
 
-    # 4. 값 교환
     print(f"  > '{key}' 값 {swap_rate * 100:.2f}% (총 {num_pairs}쌍) 교환 시작.")
     for i in range(num_pairs):
-        # 쌍으로 묶어 교환
         idx1 = swap_indices[2 * i]
         idx2 = swap_indices[2 * i + 1]
-
-        # 값 교환
         data[idx1][key], data[idx2][key] = data[idx2][key], data[idx1][key]
 
 
+def print_statistics(data: List[Dict[str, Any]]):
+    """
+    제공된 데이터 리스트의 평가 유형별 통계를 화면에 출력합니다.
+    """
+    if not data:
+        print("\n[통계 정보] - 데이터가 없어 통계를 출력할 수 없습니다.")
+        return
+
+    stats = {
+        'L_CR': {'0': 0, '1': 0},  # Context Relevance (CR)
+        'L_AF': {'0': 0, '1': 0},  # Answer Faithfulness (AF)
+        'L_AR': {'0': 0, '1': 0},  # Answer Relevance (AR)
+    }
+    all_zero_count = 0
+    all_one_count = 0
+
+    for item in data:
+        # 각 유형별 카운트
+        for key in stats.keys():
+            value = str(item.get(key, -1))  # 값이 없으면 -1로 처리하여 카운트 방지
+            if value in stats[key]:
+                stats[key][value] += 1
+
+        # 종합 판별 카운트
+        cr = item.get('L_CR')
+        af = item.get('L_AF')
+        ar = item.get('L_AR')
+
+        if cr == 0 and af == 0 and ar == 0:
+            all_zero_count += 1
+        elif cr == 1 and af == 1 and ar == 1:
+            all_one_count += 1
+
+    print("\n" + "=" * 50)
+    print("[GOLDEN 샘플 저장 전 통계 정보]")
+    print(f"총 데이터 수: {len(data)}")
+    print("=" * 50)
+
+    print("| 평가 유형 | '0' 개수 (부정) | '1' 개수 (긍정) |")
+    print("|:---------|:---------------------|:---------------------|")
+    print(f"| L_CR (C) | {stats['L_CR']['0']:<16}개  | {stats['L_CR']['1']:<16}개  |")
+    print(f"| L_AF (F) | {stats['L_AF']['0']:<16}개  | {stats['L_AF']['1']:<16}개  |")
+    print(f"| L_AR (R) | {stats['L_AR']['0']:<16}개  | {stats['L_AR']['1']:<16}개  |")
+    print("-" * 50)
+
+    print("종합 판별 결과:")
+    print(f"- 3개 유형 모두 '0'인 항목 수 (C=0 & F=0 & R=0): {all_zero_count}개")
+    print(f"- 3개 유형 모두 '1'인 항목 수 (C=1 & F=1 & R=1): {all_one_count}개")
+    print("=" * 50 + "\n")
+
+
 def generate_samples():
-    """요청된 비율에 따라 중복 없이 데이터를 샘플링하고 오류를 주입하여 저장합니다."""
+    """요청된 샘플링 및 오류 주입 로직을 실행합니다."""
 
-    input_file_name = PREPARE_FILE_NAME
-
-    # 1. 파일 로드
-    raw_data = load_data(input_file_name)
+    # 1. 파일 로드 및 초기 설정
+    raw_data = load_data(PREPARE_FILE_NAME)
     if not raw_data:
-        print("로딩된 데이터가 없어 처리를 중단합니다.")
         return
 
     total_count = len(raw_data)
-
-    # 목표 샘플 크기 계산
-    golden_size = int(total_count * 0.05)  # 전체 데이터의 5%
-    rag_extract_size = int(total_count * 0.30)  # 전체 데이터의 30%를 RAG로 추출
+    golden_size = int(total_count * 0.05)
+    rag_extract_size = int(total_count * 0.30)
 
     print(f"전체 데이터 수: {total_count}개")
-    print(f"RAG 초기 추출 목표 수 (30%): {rag_extract_size}개")
+    print(f"RAG 추출 목표 수 (30%): {rag_extract_size}개")
     print(f"GOLDEN 샘플 목표 수 (전체의 5%): {golden_size}개")
 
     # 2. RAG 샘플 1차 추출 (전체의 30%)
     if rag_extract_size > total_count:
         rag_extract_size = total_count
 
-    # random.sample을 사용하여 비복원 추출
     temp_rag_samples = random.sample(raw_data, rag_extract_size)
 
-    # 3. RAG 데이터에 ID 부여 (ID가 golden에도 포함되도록 먼저 부여)
+    # 3. RAG 데이터에 ID 부여
     for item in temp_rag_samples:
-        # q, c, a 만 남기기 전에 모든 속성이 포함된 상태에서 id를 추가
         item['id'] = str(uuid.uuid4())
-    print(f"RAG 초기 샘플 {len(temp_rag_samples)}개에 고유 ID(UUID)를 부여했습니다.")
+    print(f"\n[준비] RAG 초기 샘플 {len(temp_rag_samples)}개에 고유 ID(UUID)를 부여했습니다.")
 
-    # 4. GOLDEN 샘플 추출 (ID가 부여된 temp_rag_samples 내에서 전체의 5%만큼 추출)
+    # 4. 통계 정보 화면 출력 (GOLDEN 파일 저장 전)
+    # 통계 분석 대상은 ID가 부여된 30% 데이터입니다.
+    print_statistics(temp_rag_samples)
+
+    # 5. GOLDEN 샘플 추출 및 파일 저장
     if golden_size > rag_extract_size:
-        print(f"경고: GOLDEN 목표 크기({golden_size})가 RAG 추출 크기({rag_extract_size})보다 큽니다. RAG 크기에 맞춥니다.")
         golden_size = rag_extract_size
 
-    # ID가 부여된 temp_rag_samples 내에서 golden_size 만큼을 무작위로 추출
     golden_samples = random.sample(temp_rag_samples, golden_size)
 
-    # 5. RAG 샘플 최종 구성 (GOLDEN과 겹치지 않도록 ID를 기준으로 중복 제거)
-    # GOLDEN으로 추출된 항목의 ID를 저장
-    golden_ids = set(item['id'] for item in golden_samples)
+    # GOLDEN 데이터는 오류 주입 전, 원본 상태 그대로 저장됩니다.
+    golden_output_name = f"{PREPARE_OUT_PREFIX}_golden.jsonl"
+    save_data(golden_samples, golden_output_name)
+    print("GOLDEN 데이터 저장이 완료되었습니다. (오류 없음)")
 
-    # GOLDEN에 포함되지 않은 데이터만 최종 RAG 샘플로 구성
-    rag_samples = [item for item in temp_rag_samples if item['id'] not in golden_ids]
-
-    print(f"\n최종 RAG 샘플 수 (약 25%): {len(rag_samples)}개")
-    print(f"최종 GOLDEN 샘플 수 (5%): {len(golden_samples)}개")
-
+    # 6. RAG 샘플 오류 주입 (30% 전체 대상)
+    # golden은 이미 파일로 저장되어 있으므로, 오류 주입은 파일에 영향을 주지 않습니다.
     print("\n--- RAG 샘플 오류 주입 시작 (Negative Sampling) ---")
 
-    # 6. RAG 샘플에 오류 주입 (a 값 교환)
-    # 오류 응답을 생성하기 위한 값 바꾸기
-    swap_values(rag_samples, key='a', min_rate=0.03, max_rate=0.10)
+    # 오류 응답을 생성하기 위한 값 바꾸기 (a 값 교환: 3% ~ 10%)
+    swap_values(temp_rag_samples, key='a', min_rate=0.03, max_rate=0.10)
 
-    # 7. RAG 샘플에 오류 주입 (c 값 교환)
-    # 오류 응답을 생성하기 위한 값 바꾸기
-    swap_values(rag_samples, key='c', min_rate=0.00, max_rate=0.10)
+    # 오류 응답을 생성하기 위한 값 바꾸기 (c 값 교환: 0% ~ 10%)
+    swap_values(temp_rag_samples, key='c', min_rate=0.00, max_rate=0.10)
 
     print("--- RAG 샘플 오류 주입 완료 ---\n")
 
-    # 8. RAG 데이터 저장 (id, q, c, a 만 남김)
-    rag_output_name = f"{PREPARE_OUT_PREFIX}_rag.jsonl"
-    # keys_to_keep에 'id' 포함
-    save_data(rag_samples, rag_output_name, keys_to_keep=['id', 'q', 'c', 'a'])
+    # 7. RAG 데이터 최종 저장
+    rag_samples = temp_rag_samples
 
-    # 9. GOLDEN 데이터 저장 (모든 속성 유지, ID 포함)
-    golden_output_name = f"{PREPARE_OUT_PREFIX}_golden.jsonl"
-    save_data(golden_samples, golden_output_name)
+    # RAG 데이터 저장 (id, q, c, a 만 남김)
+    rag_output_name = f"{PREPARE_OUT_PREFIX}_rag.jsonl"
+    save_data(rag_samples, rag_output_name, keys_to_keep=['id', 'q', 'c', 'a'])
 
 
 if __name__ == "__main__":
