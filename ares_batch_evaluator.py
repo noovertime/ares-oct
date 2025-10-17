@@ -1,3 +1,5 @@
+# ares_batch_evaluator.py (상수 최적화 최종 버전)
+
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import os
@@ -9,6 +11,15 @@ import logging
 
 import config
 import ares_batch_report_util
+from config import (
+    KEY_CR,
+    KEY_AF,
+    KEY_AR,
+    JUDGE_TYPES,
+    JUDGE_PREDICTION_FIELDS,
+    GOLD_LABEL_FIELDS
+)
+
 
 # ===================================================================
 # 0. 전역 상수 및 환경 설정
@@ -26,19 +37,12 @@ MODEL_NAME = config.MODEL_NAME
 DEVICE = torch.device("cpu")
 MAX_LENGTH = 128
 
-# ARES 심사관 타입 및 폴더 매핑
-JUDGE_TYPES = ['contextrelevance', 'answerfaithfulness', 'answerrelevance']
-FOLDER_MAPPING = {
-    'contextrelevance': 'context_relevance',
-    'answerfaithfulness': 'answer_faithfulness',
-    'answerrelevance': 'answer_relevance'
-}
 
-# 골든 라벨 필드 명칭 정의
-GOLD_LABEL_FIELDS = {
-    'contextrelevance': 'L_CR',
-    'answerfaithfulness': 'L_AF',
-    'answerrelevance': 'L_AR'
+# ARES 심사관 타입 및 폴더 매핑
+FOLDER_MAPPING = {
+    config.KEY_CR: 'context_relevance',
+    config.KEY_AF: 'answer_faithfulness',
+    config.KEY_AR: 'answer_relevance'
 }
 
 
@@ -48,7 +52,8 @@ GOLD_LABEL_FIELDS = {
 
 def _find_model_path(judge_type: str) -> str:
     """고정된 심사관 이름 폴더 경로를 반환합니다."""
-    target_folder = FOLDER_MAPPING.get(judge_type.lower())
+    # judge_type은 KEY_CR, KEY_AF, KEY_AR 중 하나
+    target_folder = FOLDER_MAPPING.get(judge_type)
 
     if not target_folder:
         raise ValueError(f"정의되지 않은 심사관 타입: {judge_type}")
@@ -69,9 +74,10 @@ def load_ares_judges() -> Tuple[AutoTokenizer, Dict[str, AutoModelForSequenceCla
 
     # 1. 토크나이저 초기화
     try:
-        cr_path = _find_model_path('contextrelevance')
+        # KEY_CR을 사용하여 경로를 찾음
+        cr_path = _find_model_path(KEY_CR)
         tokenizer = AutoTokenizer.from_pretrained(cr_path, trust_remote_code=True)
-        print(f"   [INFO] 토크나이저 로드 성공 (저장된 경로에서).")
+        print(f"   [INFO] {cr_path}에서 토크나이저 로드 성공.")
     except Exception as e:
         print(f"   [WARN] 저장 경로에서 토크나이저 로드 실패. 원본 모델 ({MODEL_NAME}) 로드 시도.")
         try:
@@ -81,13 +87,13 @@ def load_ares_judges() -> Tuple[AutoTokenizer, Dict[str, AutoModelForSequenceCla
             raise fallback_e
 
     # DistilBERT 호환성을 위해 토크나이저의 'token_type_ids' 생성을 비활성화합니다.
-    tokenizer.model_input_names = [
-        name for name in tokenizer.model_input_names if name != 'token_type_ids'
-    ]
-    print("   [INFO] DistilBERT 호환성을 위해 토크나이저의 'token_type_ids' 생성을 비활성화했습니다.")
+    #tokenizer.model_input_names = [
+    #    name for name in tokenizer.model_input_names if name != 'token_type_ids'
+    #]
+    #print("   [INFO] DistilBERT 호환성을 위해 토크나이저의 'token_type_ids' 생성을 비활성화했습니다.")
 
     # 2. 모델 로드 (AutoModelForSequenceClassification 사용)
-    for judge_type in JUDGE_TYPES:
+    for judge_type in JUDGE_TYPES:  # JUDGE_TYPES 리스트 사용
         try:
             model_path = _find_model_path(judge_type)
             model = AutoModelForSequenceClassification.from_pretrained(
@@ -97,7 +103,7 @@ def load_ares_judges() -> Tuple[AutoTokenizer, Dict[str, AutoModelForSequenceCla
             )
             model.to(DEVICE)
             model.eval()
-            judges[judge_type] = model
+            judges[judge_type] = model  # judges 딕셔너리에 KEY_CR, KEY_AF, KEY_AR 키로 저장
             print(f"   [SUCCESS] {judge_type.upper()} Judge 로드 완료.")
 
         except Exception as e:
@@ -116,13 +122,15 @@ def evaluate_triple(tokenizer_obj: AutoTokenizer, judges: Dict[str, AutoModelFor
 
     results = {}
 
+    # JUDGE_PREDICTION_FIELDS 상수를 사용하여 judge_inputs 구성
     judge_inputs = {
-        'contextrelevance': (query, context, judges['contextrelevance']),
-        'answerfaithfulness': (context, answer, judges['answerfaithfulness']),
-        'answerrelevance': (query, answer, judges['answerrelevance'])
+        JUDGE_PREDICTION_FIELDS[KEY_CR]: (query, context, judges[KEY_CR]),
+        JUDGE_PREDICTION_FIELDS[KEY_AF]: (context, answer, judges[KEY_AF]),
+        JUDGE_PREDICTION_FIELDS[KEY_AR]: (query, answer, judges[KEY_AR])
     }
 
     with torch.no_grad():
+        # name은 JUDGE_PREDICTION_FIELDS의 값 ('contextrelevance' 등)
         for name, (text_a, text_b, model) in judge_inputs.items():
             # 1. 입력 토큰화
             inputs = tokenizer_obj(
@@ -137,15 +145,14 @@ def evaluate_triple(tokenizer_obj: AutoTokenizer, judges: Dict[str, AutoModelFor
             outputs = model(**inputs)
             prediction = torch.argmax(outputs.logits, dim=1).item()
 
-            results[name] = prediction
+            results[name] = prediction  # 결과는 JUDGE_PREDICTION_FIELDS의 값으로 저장됨
 
     return results
 
 
-def load_gold_labels_map(filepath: str, gold_field_mapping: Dict[str, str]) -> Dict[
-    Tuple[str, str, str], Dict[str, Any]]:
+def load_gold_labels_map(filepath: str, gold_field_mapping: Dict[str, str]) -> Dict[str, Dict[str, Any]]:
     """
-    골든 라벨 파일을 로드하여 (q, c, a)의 튜플을 키로 하는 맵을 생성합니다.
+    골든 라벨 파일을 로드하여 ID(string)를 키로 하는 맵을 생성합니다. (ID 기반 매칭)
     """
     gold_map = {}
     print(f"\n>> 골든 라벨 로딩 시작: {filepath}")
@@ -156,29 +163,26 @@ def load_gold_labels_map(filepath: str, gold_field_mapping: Dict[str, str]) -> D
                 try:
                     data = json.loads(line.strip())
 
-                    # Q, C, A를 정규화된 튜플 키로 사용
-                    q = data.get('q', '').strip()
-                    c = data.get('c', '').strip()
-                    a = data.get('a', '').strip()
+                    # ID 필드를 고유 키로 사용
+                    sample_id = data.get('id')
 
-                    if not all([q, c, a]):
-                        print(f"[WARN] 골든 라벨 파일 {filepath}의 {i + 1}번째 줄: QCA 중 누락. 건너뜀.")
+                    if not sample_id:
+                        print(f"[WARN] 골든 라벨 파일 {filepath}의 {i + 1}번째 줄: 'id' 필드 누락. 건너뜀.")
                         continue
 
-                    key = (q, c, a)
-
                     labels = {}
-                    # 기계 예측 키를 이용해 골든 라벨 필드(L_CR, L_AF, L_AR)를 찾습니다.
+                    # gold_field_mapping을 사용하여 L_CR 등의 필드만 추출
                     for machine_key, gold_key_name in gold_field_mapping.items():
                         if gold_key_name in data:
                             labels[gold_key_name] = data[gold_key_name]
                         else:
                             labels[gold_key_name] = -1
 
-                    gold_map[key] = labels
+
+                    gold_map[sample_id] = labels
 
                 except json.JSONDecodeError:
-                    print(f"[WARN] 골든 라벨 파일 {filepath}의 {i + 1}번째 줄: JSON 오류. 건너뜀.")
+                    print(f"[WARN] 골든 라벨 파일 {filepath}의 {i + 1}번째 줄: JSON 오류. 건너ntd.")
                     continue
 
     except FileNotFoundError:
@@ -201,7 +205,6 @@ def cleanup_evaluation_data():
     for target_dir in dirs_to_clean:
         if os.path.isdir(target_dir):
             files_deleted = 0
-            # 디렉토리 내의 모든 항목을 순회합니다.
             for filename in os.listdir(target_dir):
                 file_path = os.path.join(target_dir, filename)
                 try:
@@ -246,7 +249,7 @@ def run_ares_pipeline():
     GOLD_LABEL_PATH = os.path.join(config.DATA_GOLDEN_DIR, config.DATA_GOLDEN_FILE_NAME)
     gold_label_map = load_gold_labels_map(GOLD_LABEL_PATH, GOLD_LABEL_FIELDS)
 
-    # PPI 보정 활성화 여부 확인 및 검증
+    # PPI 보정 활성화 여부 검증
     if not gold_label_map:
         print("\n[FATAL ERROR] PPI 보정을 위한 골든 라벨 데이터가 없습니다. 파이프라인을 중단합니다.")
         return
@@ -287,23 +290,34 @@ def run_ares_pipeline():
                 try:
                     data = json.loads(line.strip())
 
-                    query = data.get('q', '').strip()
-                    context = data.get('c', '').strip()
-                    answer = data.get('a', '').strip()
+                    # Q, C, A 정규화: 매칭 정확도를 위해 입력 데이터도 정규화
+                    query = ' '.join(data.get('q', '').split()).strip()
+                    context = ' '.join(data.get('c', '').split()).strip()
+                    answer = ' '.join(data.get('a', '').split()).strip()
 
                     if not all([query, context, answer]):
-                        print(f"[SKIP] 데이터 형식 오류 (Q, C, A 중 누락) - 파일: {file_base_name}, 라인: {line.strip()[:50]}...")
                         continue
+
+                    # QCA 정규화된 값을 원본 data 딕셔너리에 덮어쓰기 (PPI 파일의 일관성 유지)
+                    data['q'] = query
+                    data['c'] = context
+                    data['a'] = answer
 
                     # 1. ARES 예측 수행
                     scores = evaluate_triple(tokenizer, judges, query, context, answer)
 
+                    # scores의 키는 JUDGE_PREDICTION_FIELDS의 값 ('contextrelevance' 등)
                     data.update(scores)
 
-                    # 2. 골든 라벨 추가 (PPI 보정을 위한 핵심 데이터)
-                    gold_key = (query, context, answer)
-                    if gold_key in gold_label_map:
-                        data.update(gold_label_map[gold_key])
+                    # 2. 골든 라벨 추가 (ID를 키로 사용)
+                    sample_id = data.get('id')
+
+                    if not sample_id:
+                        # ID가 없으면 골든 라벨 매칭 불가능. 경고만 주고 넘어갑니다.
+                        pass
+                    elif sample_id in gold_label_map:
+                        # gold_label_map의 키는 GOLD_LABEL_FIELDS의 값 ('L_CR' 등)
+                        data.update(gold_label_map[sample_id])
 
                     all_results_for_file.append(data)
                     total_successful_evals += 1
@@ -341,10 +355,9 @@ def run_ares_pipeline():
 
     # --- 2. 통계 보고서 생성 단계 (유틸리티 함수 호출) ---
     print("\n>> ARES 통계 보고서 생성 시작")
-    # ppi_correction_active = True 이며, 세 번째 인수는 이제 사용하지 않음
+    # ares_batch_report_util.py에 PPI 보정 활성화와 GOLD_LABEL_FIELDS 전달
     ares_batch_report_util.run_summary_generation_pipeline(True, GOLD_LABEL_FIELDS)
 
 
 if __name__ == "__main__":
     run_ares_pipeline()
-    #cleanup_evaluation_data()
