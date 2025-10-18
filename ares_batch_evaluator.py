@@ -104,10 +104,10 @@ def load_ares_judges() -> Tuple[AutoTokenizer, Dict[str, AutoModelForSequenceCla
             model.to(DEVICE)
             model.eval()
             judges[judge_type] = model  # judges 딕셔너리에 KEY_CR, KEY_AF, KEY_AR 키로 저장
-            print(f"   [SUCCESS] {judge_type.upper()} Judge 로드 완료.")
+            print(f"   [SUCCESS] {judge_type} Judge 로드 완료.")
 
         except Exception as e:
-            print(f"   [ERROR] {judge_type.upper()} Judge 로드 실패: {e}. 이 모델은 건너뜁니다.")
+            print(f"   [ERROR] {judge_type} Judge 로드 실패: {e}. 이 모델은 건너뜁니다.")
 
     if len(judges) != 3:
         raise RuntimeError(f"총 {len(judges)}개만 로드됨. ARES 평가를 위해 3개 모델이 모두 필요합니다.")
