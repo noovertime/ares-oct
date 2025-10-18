@@ -1,4 +1,4 @@
-# ares_batch_report_util_refactored.py
+# ARES 보고서 생성
 from __future__ import annotations
 
 import json
