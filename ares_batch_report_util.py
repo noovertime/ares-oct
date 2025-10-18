@@ -14,7 +14,6 @@ from scipy.stats import norm
 import config
 from config import KEY_CR, KEY_AF, KEY_AR, JUDGE_TYPES
 
-
 # ===================================================================
 # 상수
 # ===================================================================
@@ -67,10 +66,10 @@ def _init_score_dict() -> Dict[str, List[Any]]:
 # ===================================================================
 
 def calculate_ppi_asymptotic_ci(
-    machine_preds: List[int],
-    rectifiers: List[float],
-    total_n: int,
-    labeled_n: int
+        machine_preds: List[int],
+        rectifiers: List[float],
+        total_n: int,
+        labeled_n: int
 ) -> float:
     """PPI Asymptotic CI Half-width 계산."""
     if labeled_n <= 1 or total_n <= 0:
@@ -92,9 +91,9 @@ def calculate_ppi_asymptotic_ci(
 # ===================================================================
 
 def analyze_ppi_file(
-    filepath: str,
-    ppi_correction_active: bool,
-    gold_fields: Dict[str, str]
+        filepath: str,
+        ppi_correction_active: bool,
+        gold_fields: Dict[str, str]
 ) -> Optional[Dict[str, Any]]:
     """단일 PPI 파일을 분석하고 요약 결과를 반환."""
     if not ppi_correction_active:
@@ -173,19 +172,24 @@ def analyze_ppi_file(
 
 
 # ===================================================================
-# 보고서 생성
+# 보고서 생성 (수정됨)
 # ===================================================================
 
 def generate_summary_report(model_summaries: List[Dict[str, Any]]) -> str:
-    """Markdown 형식 보고서 생성 (원본 모든 설명 포함)."""
+    """Markdown 형식 보고서 생성 (요청된 마크다운/HTML 테이블 형식 적용)."""
     if not model_summaries:
         return "[WARN] 분석할 모델 데이터가 없습니다."
 
+    # 'overall' 점수를 기준으로 내림차순 정렬
     model_summaries.sort(key=lambda x: float(x["overall"]), reverse=True)
     current_time: str = time.strftime("%Y-%m-%d %H:%M:%S")
+    # 모든 모델이 동일한 골든셋을 사용한다고 가정하고 첫 번째 모델의 labeled_n_rep 사용
     total_golden_set_count: int = int(model_summaries[0]["labeled_n_rep"])
     model_list: str = "\n".join([f"   - {m['model_name']}" for m in model_summaries])
 
+    # -------------------------------------------------------------
+    # 1. 보고서 기본 정보 섹션
+    # -------------------------------------------------------------
     report_content: str = f"""
 ## 🧭 ARES 결과 보고서
 평가 일자: {current_time}
@@ -204,36 +208,100 @@ def generate_summary_report(model_summaries: List[Dict[str, Any]]) -> str:
 - Answer Relevance (AR, 응답 적절성) : 답변이 질문에 직접적이고 구체적인가
 
 --- 
-### 3️⃣ PPI 보정 점수 요약 
+### 3️⃣ PPI 추정 성능 점수
 
-| 평가대상 | **CR (보정)** | AF (보정) | AR (보정) | **종합 점수** | 기계 예측 평균 | **CR 편향** | **AF 편향** | **AR 편향** | 총 샘플 수 |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+#### 💡 요약 
+| 순번 | 평가대상 | 종합 점수 | CR(보정) | AF(보정) | AR(보정)|
+|:--|:---:|:---:|:---:|:---:|:---:|
 """
+    # -------------------------------------------------------------
+    # 2. 요약 테이블 (마크다운)
+    # -------------------------------------------------------------
+    for i, summary in enumerate(model_summaries):
+        report_content += (
+            f"| {i + 1} "
+            f"| {summary['model_name']} "
+            f"| {summary['overall']:.2f} "
+            f"| {summary[KEY_CR]['corrected_mean']:.2f} "
+            f"| {summary[KEY_AF]['corrected_mean']:.2f} "
+            f"| {summary[KEY_AR]['corrected_mean']:.2f} |\n"
+        )
 
-    for summary in model_summaries:
+    report_content += "\n<br>\n"
+    report_content += "#### 💡 세부내용\n"
+    report_content += """
+<table>
+  <thead>
+    <tr>
+        <td rowspan="2">순번</td>
+        <td rowspan="2">평가대상</td>
+        <td colspan="3" align="center">CR</td>
+        <td colspan="3" align="center">AF</td>
+        <td colspan="3" align="center">AR</td>
+        <td rowspan="2">모델예측 평균</td>
+        <td rowspan="2">총 샘플 수</td>
+    </tr>
+    <tr>
+        <td>보정</td>
+        <td>편향</td>
+        <td>CI</td>
+        <td>보정</td>
+        <td>편향</td>
+        <td>CI</td>
+        <td>보정</td>
+        <td>편향</td>
+        <td>CI</td>
+    </tr>
+  </thead>
+  <tbody>
+"""
+    # -------------------------------------------------------------
+    # 3. 세부내용 테이블 (HTML)
+    # -------------------------------------------------------------
+    for i, summary in enumerate(model_summaries):
         cr = summary[KEY_CR]
         af = summary[KEY_AF]
         ar = summary[KEY_AR]
 
-        report_content += (
-            f"| **{summary['model_name']}** "
-            f"| {cr['corrected_mean']:.2f} "
-            f"| {af['corrected_mean']:.2f} "
-            f"| {ar['corrected_mean']:.2f} "
-            f"| **{summary['overall']:.2f}** "
-            f"| {cr['machine_mean']:.2f} "
-            f"| **{cr['applied_rectifier']:.3f}** "
-            f"| **{af['applied_rectifier']:.3f}** "
-            f"| **{ar['applied_rectifier']:.3f}** "
-            f"| {summary['n']} |\n"
-        )
+        # 모델의 모든 기계 예측 평균 (CR 축의 machine_mean 사용)
+        model_machine_mean: float = cr['machine_mean']
 
-    report_content += f"""
-#### 💡 점수 요약 의미 설명
-- CR, AF, AR (보정) : PPI 보정 로직을 거쳐 **편향이 제거된** 각 축의 최종 성능 추정치. 1에 가까울수록 좋은 성능 (0.0 ~ 1.0)
+        report_content += "    <tr>\n"
+        report_content += f"        <td>{i + 1}</td>\n"
+        report_content += f"        <td>{summary['model_name']}</td>\n"
+
+        # CR
+        report_content += f"        <td>{cr['corrected_mean']:.2f}</td>\n"
+        report_content += f"        <td>{cr['applied_rectifier']:.3f}</td>\n"
+        report_content += f"        <td>{cr['ci']:.2f}</td>\n"
+
+        # AF
+        report_content += f"        <td>{af['corrected_mean']:.2f}</td>\n"
+        report_content += f"        <td>{af['applied_rectifier']:.3f}</td>\n"
+        report_content += f"        <td>{af['ci']:.2f}</td>\n"
+
+        # AR
+        report_content += f"        <td>{ar['corrected_mean']:.2f}</td>\n"
+        report_content += f"        <td>{ar['applied_rectifier']:.3f}</td>\n"
+        report_content += f"        <td>{ar['ci']:.2f}</td>\n"
+
+        # 모델 예측 및 샘플 수
+        report_content += f"        <td>{model_machine_mean:.2f}</td>\n"
+        report_content += f"        <td>{summary['n']}</td>\n"
+        report_content += "    </tr>\n"
+
+    report_content += """
+  </tbody>
+</table>
+
+<br>
+
+#### 💡 의미 설명
+- CR, AF, AR (보정) : PPI 보정 로직을 거쳐 **편향이 제거된** 성능 추정치. 1에 가까울수록 좋은 성능 (0.0 ~ 1.0)
 - 종합 점수 : 심사관의 예측 평균에서 골든셋 기반 예측 편향을 제거하여 계산된 신뢰할 수 있는 성능 추정치
-- 심사관 예측 평균 : ARES 심사관이 예측한 점수($\\hat{{Y}}$)의 단순 평균 (보정 전 점수)
-- CR/AF/AR 편향 : 모델의 예측 평균($\\hat{{Y}}$) - 각 축의 편향값. ($\\hat{{Y}} - Y$)
+- CI (신뢰구간) : 95% 신뢰구간의 절반 폭(Half-width). 작을수록 보정된 평균(Corrected Mean)에 대한 신뢰도 높음.
+- 모델 예측 평균 : ARES 심사관이 예측한 점수($\hat{Y}$)의 단순 평균 (보정 전 점수)
+- CR/AF/AR 편향 : 모델의 예측 평균($\hat{Y}$) - 각 축의 편향값. ($\hat{Y} - Y$)
 - 총 샘플 수 : 평가에 사용된 Q-C-A 트리플의 전체 개수
 
 ---
@@ -250,8 +318,8 @@ def generate_summary_report(model_summaries: List[Dict[str, Any]]) -> str:
 # ===================================================================
 
 def run_summary_generation_pipeline(
-    ppi_correction_active: bool,
-    gold_fields: Dict[str, str]
+        ppi_correction_active: bool,
+        gold_fields: Dict[str, str]
 ) -> None:
     """보고서 생성 파이프라인."""
     if not ppi_correction_active:
