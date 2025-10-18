@@ -114,10 +114,12 @@ def analyze_ppi_file(filepath: str, ppi_correction_active: bool,
     if total_n == 0:
         return None
 
+
     summary = {
         'model_name': model_name,
         'n': total_n,
-        'ppi_active': ppi_correction_active
+        'ppi_active': ppi_correction_active,
+        'labeled_n_rep':  gold_label_counts[KEY_CR] # 대표 골든셋 개수는 CR 축을 기준으로
     }
 
     overall_corrected_scores = []
@@ -175,29 +177,36 @@ def generate_summary_report(model_summaries: List[Dict[str, Any]]):
     # 종합 점수 기준으로 정렬
     model_summaries.sort(key=lambda x: x['overall'], reverse=True)
 
-    report_title = "PPI 보정 결과 (골든 라벨 기반)"
-    rectifier_note = "골든 라벨(Gold Label) 기반의 실제 편향(Rectifier Mean)이 적용되었습니다."
+    # 모델 리스트 생성
+    model_list_markdown = ""
+    for summary in model_summaries:
+        model_list_markdown += f"\n   - {summary['model_name']}\n"
+
+    # 골든셋 갯수
+    total_golden_set_count = model_summaries[0]['labeled_n_rep']
 
     report_content = f"""
-# 🧭 ARES 자동 평가 결과 보고서 ({report_title})
-
-프로젝트명: ARES 심사관 로컬 배치 평가
-평가 프레임워크: Stanford ARES (PPI 보정 로직 통합)
+## 🧭 ARES 결과 보고서
 평가 일자: {current_time}
-평가 대상 모델: {', '.join([s['model_name'] for s in model_summaries])}
 
-### 1️⃣ 평가 개요 (PPI 보정 기반)
-
-| 평가 축 | 미세부 설명 |
-| :--- | :--- |
-| **Context Relevance (CR)** | 검색된 문서가 질문과 얼마나 관련 있는가 (문맥 적합성) |
-| **Answer Faithfulness (AF)** | 생성된 답변이 검색 문서 내용에 충실한가 (응답 충실도) |
-| **Answer Relevance (AR)** | 답변이 질문에 직접적이고 구체적인가 (응답 적절성) |
+--- 
+### 1️⃣ 프로젝트 개요 
+- 프로젝트명: ARES 심사관 로컬 배치 평가
+- 평가 프레임워크: Stanford ARES (골든셋 기반 PPI 보정 로직 통합)
+- 평가 대상 : (q, c, a) 트리플 셋으로 구성 {model_list_markdown}
+- 골든셋 유효 개수 (n) : {total_golden_set_count}
 
 ---
-### 2️⃣ PPI 보정 점수 요약 (축별 편향 포함)
+### 2️⃣ 평가 
+- Context Relevance (CR, 문맥 적합성) : 검색된 문서가 질문과 얼마나 관련 있는가
+- Answer Faithfulness (AF, 응답 충실도) : 생성된 답변이 검색 문서 내용에 충실한가 
+- Answer Relevance (AR, 응답 적절성) : 답변이 질문에 직접적이고 구체적인가
 
-| 모델명 | **CR (보정)** | AF (보정) | AR (보정) | **종합 점수** | 기계 예측 평균 | **CR 편향** | **AF 편향** | **AR 편향** | 총 샘플 수 |
+
+---
+### 3️⃣ PPI 보정 점수 요약 
+
+| 평가대상 | **CR (보정)** | AF (보정) | AR (보정) | **종합 점수** | 기계 예측 평균 | **CR 편향** | **AF 편향** | **AR 편향** | 총 샘플 수 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 """
 
@@ -227,21 +236,19 @@ def generate_summary_report(model_summaries: List[Dict[str, Any]]):
         )
 
     report_content += f"""
----
-#### 💡 요약 표 컬럼 의미 설명
 
-| 컬럼명 | 설명 |
-| :--- | :--- |
-| **CR, AF, AR (보정)** | PPI 보정 로직을 거쳐 **편향이 제거된** 각 축의 최종 성능 추정치입니다. (0.00 ~ 1.00) |
-| **종합 점수** | CR, AF, AR 세 가지 보정 점수의 평균입니다. |
-| **기계 예측 평균** | ARES 심사관이 실제로 예측한 점수($\hat{{Y}}$)의 단순 평균입니다. (보정 전 점수) |
-| **CR/AF/AR 편향** | 기계 예측 평균($\hat{{Y}}$)에서 보정 점수를 얻기 위해 차감된 **각 축의 편향 값**($\hat{{Y}} - Y$)입니다. |
-| **총 샘플 수** | 평가에 사용된 Q-C-A 트리플의 전체 개수입니다. |
----
-### 3️⃣ 보정 로직 및 해석
+#### 💡 점수 요약 의미 설명
+- CR, AF, AR (보정) : PPI 보정 로직을 거쳐 **편향이 제거된** 각 축의 최종 성능 추정치. 1에 가까울수록 좋은 성능 (0.0 ~ 1.0)
+- 종합 점수 : 심사관의 예측 평균에서 골든셋 기반 예측 편향을 제거하여 계산된 신뢰할 수 있는 성능 추정치
+- 심사관 예측 평균 : ARES 심사관이 예측한 점수($\hat{{Y}}$)의 단순 평균 (보정 전 점수)
+- CR/AF/AR 편향 : 모델의 예측 평균($\hat{{Y}}$) - 각 축의 편향값. ($\hat{{Y}} - Y$)
+- 총 샘플 수 : 평가에 사용된 Q-C-A 트리플의 전체 개수
 
-* **PPI 보정 적용:** PPI(Prediction-Powered Inference) 방식에 따라 **보정 평균 (Corrected Mean)**을 산출했습니다.
-* **보정 방법:** {rectifier_note}
+---
+### 4️⃣ 보정 로직 및 해석
+
+* PPI 보정 적용: PPI(Prediction-Powered Inference) 방식에 따라 보정 평균 (Corrected Mean)을 산출했습니다.
+* 보정 방법: 골든 라벨(Gold Label) 기반의 실제 편향(Rectifier Mean)이 적용되었습니다.
 """
 
     return report_content
@@ -291,7 +298,7 @@ def run_summary_generation_pipeline(ppi_correction_active: bool, gold_fields: Di
     report_content = generate_summary_report(model_summaries)
 
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    output_filename = f"summary_report_ppi_{timestamp}.md"
+    output_filename = f"summary_{timestamp}.md"
     output_path = os.path.join(OUTPUT_DIR_SUM, output_filename)
 
     with open(output_path, 'w', encoding='utf-8') as outfile:

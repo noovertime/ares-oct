@@ -87,10 +87,10 @@ def load_ares_judges() -> Tuple[AutoTokenizer, Dict[str, AutoModelForSequenceCla
             raise fallback_e
 
     # DistilBERT 호환성을 위해 토크나이저의 'token_type_ids' 생성을 비활성화합니다.
-    #tokenizer.model_input_names = [
-    #    name for name in tokenizer.model_input_names if name != 'token_type_ids'
-    #]
-    #print("   [INFO] DistilBERT 호환성을 위해 토크나이저의 'token_type_ids' 생성을 비활성화했습니다.")
+    tokenizer.model_input_names = [
+        name for name in tokenizer.model_input_names if name != 'token_type_ids'
+    ]
+    print("   [INFO] DistilBERT 호환성을 위해 토크나이저의 'token_type_ids' 생성을 비활성화했습니다.")
 
     # 2. 모델 로드 (AutoModelForSequenceClassification 사용)
     for judge_type in JUDGE_TYPES:  # JUDGE_TYPES 리스트 사용

@@ -42,3 +42,7 @@ dist/
 # HuggingFace Cache (모델 로드/토크나이저 캐시)
 .cache/
 .huggingface/
+/model_v2/
+/model_v1/
+/model/
+/data/
