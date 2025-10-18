@@ -54,25 +54,38 @@ def save_data(data: List[Dict[str, Any]], file_path: str, keys_to_keep: List[str
 def swap_values(data: List[Dict[str, Any]], key: str, min_rate: float, max_rate: float):
     """
     데이터 리스트 내에서 특정 키(key)의 값을 무작위로 추출된 비율만큼 서로 교환합니다.
+    (단, 두 값이 서로 다른 경우에만 교환을 진행합니다.)
     """
     data_size = len(data)
     if data_size < 2:
         return
 
     swap_rate = random.uniform(min_rate, max_rate)
-    num_pairs = math.floor(data_size * swap_rate / 2)
-    num_items_to_swap = num_pairs * 2
+    num_pairs_to_attempt = math.floor(data_size * swap_rate / 2) * 2  # 시도할 횟수
 
-    if num_items_to_swap < 2:
+    if num_pairs_to_attempt < 2:
         return
 
-    swap_indices = random.sample(range(data_size), num_items_to_swap)
+    # 교환에 시도할 무작위 인덱스 추출 (비복원 추출)
+    swap_indices = random.sample(range(data_size), num_pairs_to_attempt)
 
-    print(f"  > '{key}' 값 {swap_rate * 100:.2f}% (총 {num_pairs}쌍) 교환 시작.")
-    for i in range(num_pairs):
-        idx1 = swap_indices[2 * i]
-        idx2 = swap_indices[2 * i + 1]
-        data[idx1][key], data[idx2][key] = data[idx2][key], data[idx1][key]
+    actual_swaps = 0
+
+    # 값 교환
+    print(f"  > '{key}' 값 교환 시도 ({swap_rate * 100:.2f}%):")
+    for i in range(0, num_pairs_to_attempt, 2):
+        idx1 = swap_indices[i]
+        idx2 = swap_indices[i + 1]
+
+        val1 = data[idx1][key]
+        val2 = data[idx2][key]
+
+        # 두 값이 서로 다른 경우에만 교환을 실행
+        if val1 != val2:
+            data[idx1][key], data[idx2][key] = val2, val1
+            actual_swaps += 1
+
+    print(f"  > '{key}' 값 {actual_swaps}쌍 (총 {actual_swaps * 2}개 항목)이 실제로 교환되었습니다.")
 
 
 def print_statistics(data: List[Dict[str, Any]]):
