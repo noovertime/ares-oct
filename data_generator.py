@@ -1,5 +1,8 @@
-# data_generator.py
-
+#
+# 지정된 파일의 질문/답, 근거/답을 일정 비율 섞어서 오답 생성
+# 라벨 삭제
+# 결국 q, c, a 남음
+#
 import os
 import json
 import random
