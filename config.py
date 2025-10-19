@@ -4,7 +4,10 @@ import os
 
 # 모델 관련 설정 (ARES 심사관 로딩용)
 MODEL_NAME = "monologg/distilkobert"
-MODEL_DIR = r"model"
+#MODEL_DIR = r"C:\dev\workspaces\pycharm\ares-oct-model\ares-oct-distilkobert"
+MODEL_DIR = r"C:\dev\workspaces\pycharm\ares-oct-model\ares-oct-bert-base"
+TOKEN_TYPE_ID_OFF = 1 if "distilkobert" in os.path.basename(MODEL_DIR).lower() else 0
+
 
 # 데이터 경로 설정 (상대 경로 기준)
 DATA_ROOT = r"./data"

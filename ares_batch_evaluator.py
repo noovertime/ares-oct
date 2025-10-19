@@ -17,7 +17,8 @@ from config import (
     KEY_AR,
     JUDGE_TYPES,
     JUDGE_PREDICTION_FIELDS,
-    GOLD_LABEL_FIELDS
+    GOLD_LABEL_FIELDS,
+    TOKEN_TYPE_ID_OFF
 )
 
 
@@ -77,7 +78,7 @@ def load_ares_judges() -> Tuple[AutoTokenizer, Dict[str, AutoModelForSequenceCla
         # KEY_CR을 사용하여 경로를 찾음
         cr_path = _find_model_path(KEY_CR)
         tokenizer = AutoTokenizer.from_pretrained(cr_path, trust_remote_code=True)
-        print(f"   [INFO] {cr_path}에서 토크나이저 로드 성공.")
+        print(f"   [INFO] {cr_path} 에서 토크나이저 로드 성공.")
     except Exception as e:
         print(f"   [WARN] 저장 경로에서 토크나이저 로드 실패. 원본 모델 ({MODEL_NAME}) 로드 시도.")
         try:
@@ -86,11 +87,12 @@ def load_ares_judges() -> Tuple[AutoTokenizer, Dict[str, AutoModelForSequenceCla
             print(f"   [FATAL] 토크나이저 로드 최종 실패: {fallback_e}")
             raise fallback_e
 
-    # DistilBERT 호환성을 위해 토크나이저의 'token_type_ids' 생성을 비활성화합니다.
-    tokenizer.model_input_names = [
-        name for name in tokenizer.model_input_names if name != 'token_type_ids'
-    ]
-    print("   [INFO] DistilBERT 호환성을 위해 토크나이저의 'token_type_ids' 생성을 비활성화했습니다.")
+    if TOKEN_TYPE_ID_OFF:
+        # DistilBERT 호환성을 위해 토크나이저의 'token_type_ids' 생성을 비활성화합니다.
+        tokenizer.model_input_names = [
+            name for name in tokenizer.model_input_names if name != 'token_type_ids'
+        ]
+        print("   [INFO] DistilBERT 호환성을 위해 토크나이저의 'token_type_ids' 생성을 비활성화했습니다.")
 
     # 2. 모델 로드 (AutoModelForSequenceClassification 사용)
     for judge_type in JUDGE_TYPES:  # JUDGE_TYPES 리스트 사용
@@ -104,7 +106,7 @@ def load_ares_judges() -> Tuple[AutoTokenizer, Dict[str, AutoModelForSequenceCla
             model.to(DEVICE)
             model.eval()
             judges[judge_type] = model  # judges 딕셔너리에 KEY_CR, KEY_AF, KEY_AR 키로 저장
-            print(f"   [SUCCESS] {judge_type} Judge 로드 완료.")
+            print(f"   [SUCCESS] {judge_type} Judge 로드 완료 ( {model_path} )")
 
         except Exception as e:
             print(f"   [ERROR] {judge_type} Judge 로드 실패: {e}. 이 모델은 건너뜁니다.")
