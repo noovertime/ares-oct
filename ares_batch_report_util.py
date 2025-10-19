@@ -108,8 +108,9 @@ def analyze_ppi_file(
     gold_label_counts: Dict[str, int] = {k: 0 for k in JUDGE_TYPES}
 
     model_name_raw: str = os.path.basename(filepath)
-    name_parts: List[str] = model_name_raw.split('_')
-    model_name: str = "_".join(name_parts[:-1]).split(".jsonl")[0] or model_name_raw.split(".jsonl")[0]
+    #name_parts: List[str] = model_name_raw.split('_')
+    #model_name: str = "_".join(name_parts[:-1]).split(".jsonl")[0] or model_name_raw.split(".jsonl")[0]
+    model_name: str = model_name_raw.replace(".jsonl", "")
 
     for data in records:
         for key in JUDGE_TYPES:
@@ -198,7 +199,8 @@ def generate_summary_report(model_summaries: List[Dict[str, Any]]) -> str:
 ### 1️⃣ 프로젝트 개요 
 - 프로젝트명: ARES 심사관 로컬 배치 평가
 - 평가 프레임워크: Stanford ARES (골든셋 기반 PPI 보정 로직 통합)
-- 평가 대상 : (q, c, a) 트리플 셋으로 구성 {model_list}
+- 평가 대상 : (q, c, a) 트리플 셋으로 구성 <br>
+{model_list}
 - 골든셋 유효 개수 (n) : {total_golden_set_count}
 
 --- 
@@ -209,8 +211,8 @@ def generate_summary_report(model_summaries: List[Dict[str, Any]]) -> str:
 
 --- 
 ### 3️⃣ PPI 추정 성능 점수
+#### 🎯 성능점수 요약 
 
-#### 💡 요약 
 | 순번 | 평가대상 | 종합 점수 | CR(보정) | AF(보정) | AR(보정)|
 |:--|:---:|:---:|:---:|:---:|:---:|
 """
@@ -227,8 +229,17 @@ def generate_summary_report(model_summaries: List[Dict[str, Any]]) -> str:
             f"| {summary[KEY_AR]['corrected_mean']:.2f} |\n"
         )
 
-    report_content += "\n<br>\n"
-    report_content += "#### 💡 세부내용\n"
+    report_content += """
+    📝 의미 요약 
+    * 종합점수 : 평가 대상 모델의 전반적인 성능 추정치 
+    * CR/AR/AF(보정) : 문맥 적합성(CR), 응답 충실도(AF), 응답 적절성(AR) 성능 추정치
+
+
+<br>
+
+#### 🎯 성능 점수 세부 항목 값\n
+    """
+
     report_content += """
 <table>
   <thead>
@@ -238,7 +249,7 @@ def generate_summary_report(model_summaries: List[Dict[str, Any]]) -> str:
         <td colspan="3" align="center">CR</td>
         <td colspan="3" align="center">AF</td>
         <td colspan="3" align="center">AR</td>
-        <td rowspan="2">모델예측 평균</td>
+        <td rowspan="2">심사관 예측 평균</td>
         <td rowspan="2">총 샘플 수</td>
     </tr>
     <tr>
@@ -294,21 +305,41 @@ def generate_summary_report(model_summaries: List[Dict[str, Any]]) -> str:
   </tbody>
 </table>
 
-<br>
 
-#### 💡 의미 설명
-- CR, AF, AR (보정) : PPI 보정 로직을 거쳐 **편향이 제거된** 성능 추정치. 1에 가까울수록 좋은 성능 (0.0 ~ 1.0)
-- 종합 점수 : 심사관의 예측 평균에서 골든셋 기반 예측 편향을 제거하여 계산된 신뢰할 수 있는 성능 추정치
-- CI (신뢰구간) : 95% 신뢰구간의 절반 폭(Half-width). 작을수록 보정된 평균(Corrected Mean)에 대한 신뢰도 높음.
-- 모델 예측 평균 : ARES 심사관이 예측한 점수($\hat{Y}$)의 단순 평균 (보정 전 점수)
-- CR/AF/AR 편향 : 모델의 예측 평균($\hat{Y}$) - 각 축의 편향값. ($\hat{Y} - Y$)
-- 총 샘플 수 : 평가에 사용된 Q-C-A 트리플의 전체 개수
+    📝 의미 요약 
+    * CR/AR/AF(보정) : 문맥 적합성(CR), 응답 충실도(AF), 응답 적절성(AR) 성능 추정치 ( 0 ~ 1 : 최고점 ) 
+    * 편향 : ARES 심사관의 예측과 골든라벨의 평균 차이 ( 작을수록 좋음 )
+    * CI : CR/AR/AF(보정) 값의 신뢰구간 ( 작을수록 좋음 )
+    * 심사관 예측평균 : ARES 심사관이 부여한 평균 점수 
+    * 총 샘플 수 : 평가에 사용된 Q-C-A 트리플의 전체 개수
 
 ---
-### 4️⃣ 보정 로직 및 해석
-
-* PPI 보정 적용: PPI(Prediction-Powered Inference) 방식에 따라 보정 평균 (Corrected Mean)을 산출했습니다.
-* 보정 방법: 골든 라벨(Gold Label) 기반의 실제 편향(Rectifier Mean)이 적용되었습니다.
+### 4️⃣ PPI 보정 의미 
+* PPI(Prediction-Powered Inference) 역할 
+  * PPI는 ARES 심사관 모델($\hat{Y}$)의 예측 편향을 제거하여 평가 결과의 신뢰도와 통계적 효율성을 높이는 방법론 
+  * 효율성 결합 
+    * ARES 심사관이 수행한 대규모 예측 ($\hat{Y}$)의 정보력과 고비용으로 얻은 소규모 골든셋 ($Y$)의 정확성을 결합 
+  * 편향계산 (Rectifier)
+    * 소수의 골든셋에서 심사관 예측과 골든라벨의 평균 차이를 계산해 편향 수정자로 사용
+* PPI 보정 값의 의미 
+  * PPI 보정 값은 PPI 방법론을 통해 산출된 모델의 성능 추정치 
+  * 참된 성능 추정 (true performance)
+    * ARES 심사관의 예측 점수에서 골든셋 기반의 편향이 제거된 모델의 참된 성능을 신뢰할 수 있게 추정한 값 
+  * 계산공식 
+    * 보정값 = ARES 심사관 모델 예측평균 - 편향 
+  * 보고서 표시
+      * CR(보정), AF(보정), AR(보정) 값에 해당 
+* 보고서 값의 의미 상세
+  * $\text{종합 점수} = \frac{\text{CR}(\text{보정}) + \text{AF}(\text{보정}) + \text{AR}(\text{보정})}{3}$
+  * 보정 : 예측값에서 편향을 제거한 성능 추정치 
+  * 편향 : 골든셋과 심사관 예측 사이의 격차 ( -1 ~ 1 이상 )
+  * CI (Confidence Interval, 신뢰구간)
+    * PPI 보정 값(CR보정, AF보정, AR보정)의 신뢰도와 정밀도를 나타냄 
+    * 값이 작을수록 추정된 보정값에 대한 오차 범위가 좁아져 신뢰도가 높다는 것을 의미 
+  * 심사관예측점수 
+    * CR/AF/AR 항목을 평가한 점수의 평균
+    * PPI 보정의 입력값이며 편향이 포함되어 있어 이 값만으로는 모델 성능을 대표하지 않음
+    * 보정을 거친 후에 CR/AF/AR 보정값으로 표현됨 
 """
     return report_content
 
