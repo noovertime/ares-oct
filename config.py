@@ -3,9 +3,9 @@
 import os
 
 # 모델 관련 설정 (ARES 심사관 로딩용)
-MODEL_NAME = "monologg/distilkobert"
-#MODEL_DIR = r"C:\dev\workspaces\pycharm\ares-oct-model\ares-oct-distilkobert"
-MODEL_DIR = r"C:\dev\workspaces\pycharm\ares-oct-model\ares-oct-bert-base"
+MODEL_DIR = r"C:\dev\workspaces\pycharm\ares-oct-model\ares-oct-distilkobert"
+#MODEL_DIR = r"C:\dev\workspaces\pycharm\ares-oct-model\ares-oct-bert-base"
+MODEL_NAME = os.path.basename(MODEL_DIR).replace('ares-oct-', '')
 TOKEN_TYPE_ID_OFF = 1 if "distilkobert" in os.path.basename(MODEL_DIR).lower() else 0
 
 
@@ -20,7 +20,7 @@ PREPARE_OUT_PREFIX = "random_sample"
 
 # ARES 평가 관련 데이터
 #DATA_DIR = DATA_ROOT + "/set1"
-DATA_DIR = DATA_ROOT + "/set2"
+DATA_DIR = DATA_ROOT + "/set3"
 # ARES 평가 프로세스 경로
 DATA_IN_DIR = os.path.join(DATA_DIR, "in")        # 1. 배치 평가 입력 (QCA 트리플)
 DATA_OUT_DIR = os.path.join(DATA_DIR, "out")      # 2. 배치 평가 출력 (PPI *.jsonl 파일)

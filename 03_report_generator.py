@@ -12,7 +12,7 @@ from numpy.typing import NDArray
 from scipy.stats import norm
 
 import config
-from config import KEY_CR, KEY_AF, KEY_AR, JUDGE_TYPES
+from config import KEY_CR, KEY_AF, KEY_AR, JUDGE_TYPES, MODEL_NAME
 
 # ===================================================================
 # 상수
@@ -394,3 +394,7 @@ def run_summary_generation_pipeline(
         f.write(report_content)
 
     print(f"\n[완료] ARES 통계 보고서 생성됨 → {output_path}")
+
+
+if __name__ == "__main__":
+    run_summary_generation_pipeline(True, config.GOLD_LABEL_FIELDS)

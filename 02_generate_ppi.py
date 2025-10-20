@@ -1,4 +1,4 @@
-# 03_ares_batch_evaluator.py (상수 최적화 최종 버전)
+# 02_generate_ppi.py (상수 최적화 최종 버전)
 
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
@@ -114,7 +114,7 @@ def load_ares_judges() -> Tuple[AutoTokenizer, Dict[str, AutoModelForSequenceCla
     if len(judges) != 3:
         raise RuntimeError(f"총 {len(judges)}개만 로드됨. ARES 평가를 위해 3개 모델이 모두 필요합니다.")
 
-    print(f">> ARES 심사관 로드 완료. 총 {len(judges)}개 활성화.")
+    print(f">> ARES 심사관 {MODEL_NAME} 로드 완료. 총 {len(judges)}개 심사관 활성화.")
     return tokenizer, judges
 
 
@@ -221,44 +221,46 @@ def cleanup_evaluation_data():
             print(f"   [INFO] 디렉토리 '{target_dir}'가 존재하지 않아 정리할 파일이 없습니다.")
 
 
-# ===================================================================
-# 4. 메인 실행 함수 (평가 및 보고서 생성 통합)
-# ===================================================================
-
 def run_ares_pipeline():
     """
-    ARES 전체 파이프라인 실행: PPI 파일 생성 후 통계 보고서 생성까지 자동 실행합니다.
+    ARES 전체 파이프라인 실행: QCA 입력 데이터를 기반으로 ARES 심사관 예측 및 PPI 파일 생성까지 수행합니다.
     """
 
-    # --- 1. PPI 파일 생성 단계 ---
+    # --- 1. 환경 설정 및 초기화 단계 ---
 
     INPUT_DIR = config.DATA_IN_DIR
     OUTPUT_DIR = config.DATA_OUT_DIR
 
+    # 필수 디렉토리 생성 (입력, 출력, 보고서 디렉토리)
     os.makedirs(INPUT_DIR, exist_ok=True)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     os.makedirs(config.DATA_REPORT_DIR, exist_ok=True)
     print(f"\n[SETUP] QCA 입력 디렉토리: {INPUT_DIR}, PPI 출력 디렉토리: {OUTPUT_DIR}")
 
-    # 1-1. 모델 로드
+    # 1-1. ARES 심사관 모델 로드
     try:
+        # load_ares_judges() 함수를 통해 토크나이저와 심사관(judges) 모델을 로드
         tokenizer, judges = load_ares_judges()
     except RuntimeError as e:
         print(f"\n[FATAL ERROR] ARES 심사관 시스템 초기화 실패: {e}")
         return
 
-    # 1-2. 골든 라벨 로드 (PPI 보정을 위해)
+    # 1-2. 골든 라벨 로드 (PPI 보정을 위한 기준 데이터)
     GOLD_LABEL_PATH = os.path.join(config.DATA_GOLDEN_DIR, config.DATA_GOLDEN_FILE_NAME)
+    # GOLD_LABEL_FIELDS는 골든셋 파일 내의 CR, AF, AR 필드명을 정의함 (예: 'L_CR', 'L_AF', 'L_AR')
     gold_label_map = load_gold_labels_map(GOLD_LABEL_PATH, GOLD_LABEL_FIELDS)
 
-    # PPI 보정 활성화 여부 검증
+    # PPI 보정 활성화 여부 검증 (골든 라벨이 없으면 보정 통계 산출 불가)
     if not gold_label_map:
         print("\n[FATAL ERROR] PPI 보정을 위한 골든 라벨 데이터가 없습니다. 파이프라인을 중단합니다.")
         return
 
+    # 골든 라벨이 로드되었으므로 PPI 보정 활성화 플래그 설정
     ppi_correction_active = True
 
-    # 1-3. 입력 파일 목록 검색 및 처리 루프
+    # --- 2. 입력 파일 검색 및 평가 루프 단계 ---
+
+    # 2-1. 입력 파일 목록 검색 (INPUT_DIR 내의 모든 .jsonl 파일)
     input_files = [
         os.path.join(INPUT_DIR, f)
         for f in os.listdir(INPUT_DIR)
@@ -275,6 +277,7 @@ def run_ares_pipeline():
     total_successful_evals = 0
     full_start_time = time.time()
 
+    # 2-2. 파일별 평가 및 PPI 결과 생성
     for file_path in input_files:
         start_time = time.time()
         file_base_name = os.path.basename(file_path).replace('.jsonl', '')
@@ -292,7 +295,7 @@ def run_ares_pipeline():
                 try:
                     data = json.loads(line.strip())
 
-                    # Q, C, A 정규화: 매칭 정확도를 위해 입력 데이터도 정규화
+                    # Q, C, A 정규화: 스페이스 제거 및 정리 후 원본 덮어쓰기 (매칭 및 일관성 유지)
                     query = ' '.join(data.get('q', '').split()).strip()
                     context = ' '.join(data.get('c', '').split()).strip()
                     answer = ' '.join(data.get('a', '').split()).strip()
@@ -300,26 +303,20 @@ def run_ares_pipeline():
                     if not all([query, context, answer]):
                         continue
 
-                    # QCA 정규화된 값을 원본 data 딕셔너리에 덮어쓰기 (PPI 파일의 일관성 유지)
                     data['q'] = query
                     data['c'] = context
                     data['a'] = answer
 
-                    # 1. ARES 예측 수행
+                    # ARES 심사관 예측 수행 (scores: ARES 심사관이 예측한 CR, AF, AR 점수)
                     scores = evaluate_triple(tokenizer, judges, query, context, answer)
-
-                    # scores의 키는 JUDGE_PREDICTION_FIELDS의 값 ('contextrelevance' 등)
                     data.update(scores)
 
-                    # 2. 골든 라벨 추가 (ID를 키로 사용)
+                    # 골든 라벨 추가 (ID를 키로 사용하여 골든셋 맵에서 매칭)
                     sample_id = data.get('id')
-
-                    if not sample_id:
-                        # ID가 없으면 골든 라벨 매칭 불가능. 경고만 주고 넘어갑니다.
-                        pass
-                    elif sample_id in gold_label_map:
-                        # gold_label_map의 키는 GOLD_LABEL_FIELDS의 값 ('L_CR' 등)
+                    if sample_id and sample_id in gold_label_map:
+                        # 골든셋 필드명 (L_CR 등)을 딕셔너리에 추가
                         data.update(gold_label_map[sample_id])
+                    # ID가 없는 경우나 매칭이 안 되는 경우는 PPI 파일에 골든 라벨 없이 추가됨
 
                     all_results_for_file.append(data)
                     total_successful_evals += 1
@@ -331,10 +328,12 @@ def run_ares_pipeline():
 
         end_time = time.time()
 
+        # 2-3. PPI 결과 파일 저장
         processed_count_in_file = len(all_results_for_file)
         if processed_count_in_file > 0:
             timestamp = time.strftime("%Y%m%d_%H%M%S")
-            output_filename = f"{file_base_name}_{timestamp}.jsonl"
+            # MODEL_NAME 상수가 정의되어 있다고 가정하고 파일명 생성
+            output_filename = f"{MODEL_NAME}_{timestamp}.jsonl"
             output_path = os.path.join(OUTPUT_DIR, output_filename)
 
             with open(output_path, 'w', encoding='utf-8') as outfile:
@@ -342,10 +341,12 @@ def run_ares_pipeline():
                     outfile.write(json.dumps(result, ensure_ascii=False) + '\n')
 
             elapsed_time = end_time - start_time
-            print(f"\n--- {file_base_name} PPI 생성 완료 ---")
+            print(f"\n--- {output_filename} PPI 생성 완료 ---")
             print(f"  평가 성공 샘플 수: {processed_count_in_file} / {total_samples_in_file}개")
             print(f"  소요 시간: {elapsed_time:.2f}초")
             print(f"  저장 경로: {output_path}")
+
+    # --- 3. 최종 요약 단계 ---
 
     full_end_time = time.time()
     full_elapsed_time = full_end_time - full_start_time
@@ -354,11 +355,6 @@ def run_ares_pipeline():
     print(f"총 PPI 생성 샘플 수: {total_successful_evals}개")
     print(f"총 소요 시간: {full_elapsed_time:.2f}초")
     print("==================================================")
-
-    # --- 2. 통계 보고서 생성 단계 (유틸리티 함수 호출) ---
-    print("\n>> ARES 통계 보고서 생성 시작")
-    # ares_batch_report_util.py에 PPI 보정 활성화와 GOLD_LABEL_FIELDS 전달
-    ares_batch_report_util.run_summary_generation_pipeline(True, GOLD_LABEL_FIELDS)
 
 
 if __name__ == "__main__":
