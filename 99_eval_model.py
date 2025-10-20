@@ -1,17 +1,29 @@
 import json
+import torch
 from transformers import AutoTokenizer, DistilBertForSequenceClassification, AutoModelForSequenceClassification, \
-    pipeline
+    TrainingArguments, Trainer
 import numpy as np
 from datasets import Dataset
 from sklearn.metrics import f1_score
 import os
 import logging
+# ⚠️ NOTE: config 모듈이 외부에 있다고 가정합니다.
 import config
+from torch.utils.data import DataLoader, SequentialSampler, TensorDataset
 
 # --- 로깅 설정: 토큰화 경고 메시지 (Warning) 숨기기 ---
 logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
 
-# 모델 설정 (전역 상수라고 가정)
+# ===================================================================
+# 0. 전역 상수 설정 (config 모듈에서 가져온다고 가정)
+# ===================================================================
+# ⚠️ NOTE: config.MODEL_NAME 등은 외부 config 파일에 정의되어 있어야 합니다.
+# 예시:
+# MODEL_NAME = "monologg/distilkobert"
+# DATA_EVAL_DIR = "/data/eval"
+# DATA_EVAL_FILE_NAME = "eval_data.jsonl"
+# MODEL_DIR = "/models"
+
 NUM_TRAIN_EPOCHS = 5
 TRAIN_BATCH_SIZE = 32
 EVAL_BATCH_SIZE = 64
@@ -23,6 +35,10 @@ JUDGE_TASKS = [
     ('answer_relevance', 'q', 'a', 'L_AR'),
 ]
 
+
+# ===================================================================
+# 1. 보조 함수
+# ===================================================================
 
 def load_jsonl_to_list(file_path):
     """지정된 JSONL 파일 경로로부터 데이터를 로드합니다."""
@@ -48,14 +64,13 @@ def prepare_dataset(data_list, text_a_key, text_b_key, label_key):
     로드된 리스트 데이터를 Hugging Face Dataset 형식으로 변환합니다.
     (pandas 사용 없이, Dataset.from_dict 사용)
     """
-
     dataset_dict = {
         'text_a': [],
         'text_b': [],
         'labels': []
     }
-
     for item in data_list:
+        # NOTE: .get()을 사용하여 키가 없을 때 오류 방지
         dataset_dict['text_a'].append(item.get(text_a_key))
         dataset_dict['text_b'].append(item.get(text_b_key))
         dataset_dict['labels'].append(item.get(label_key))
@@ -63,11 +78,9 @@ def prepare_dataset(data_list, text_a_key, text_b_key, label_key):
     return Dataset.from_dict(dataset_dict)
 
 
-# 성능 지표 함수 (F1 스코어 및 정확도) - 유지
 def compute_metrics(y_true, y_pred):
     """실제 레이블과 예측 레이블을 기반으로 F1 및 Accuracy를 계산합니다."""
     accuracy = np.mean(y_true == y_pred)
-    # 이진 분류를 위한 'binary' average 사용
     f1 = f1_score(y_true, y_pred, average='binary')
 
     return {
@@ -76,40 +89,46 @@ def compute_metrics(y_true, y_pred):
     }
 
 
+# ===================================================================
+# 2. 평가 함수 (PyTorch 수동 추론)
+# ===================================================================
+
 def evaluate_judges():
     """
-    config 모듈의 경로를 사용하여, 모델 디렉토리 내의 세 가지 Judge 모델을 찾아
-    pipeline 모드로 성능 평가를 수행합니다.
-    (CPU Only 환경에서 accelerate 오류를 우회하기 위한 방식)
+    CPU Only 환경에서 Trainer/accelerate 없이 PyTorch DataLoader를 사용하여
+    모든 Judge 모델의 성능을 평가합니다.
     """
     print("\n\n=============================================")
-    print("✨ 심사관 모델 성능 평가 시작 (Pipeline 모드) ✨")
+    print("✨ 심사관 모델 성능 평가 시작 (PyTorch 수동 모드) ✨")
     print("=============================================")
 
     all_results = []
 
-    # 모델 이름으로 클래스 결정 (Pipeline은 내부적으로 AutoModel을 사용하지만, 정보 제공 목적)
+    # 모델 클래스 결정 (MODEL_NAME에 따라 동적 결정)
     model_name_lower = config.MODEL_NAME.lower()
     if "distil" in model_name_lower:
         MODEL_CLS = DistilBertForSequenceClassification
-        print(f"[INFO] 모델 클래스: DistilBertForSequenceClassification")
     elif "bert" in model_name_lower or "klue" in model_name_lower:
         MODEL_CLS = AutoModelForSequenceClassification
-        print(f"[INFO] 모델 클래스: AutoModelForSequenceClassification")
     else:
         MODEL_CLS = AutoModelForSequenceClassification
-        print(f"[INFO] 모델 클래스: AutoModelForSequenceClassification (기본값 설정)")
+    print(f"[INFO] 모델 클래스: {MODEL_CLS.__name__}")
 
-    # 1. 평가용 파일 경로 설정 및 확인 (모든 Judge가 동일한 파일을 사용한다고 가정)
+    # 1. 평가용 파일 경로 설정 및 확인
     eval_json_path = os.path.join(config.DATA_EVAL_DIR, config.DATA_EVAL_FILE_NAME)
     if not os.path.exists(eval_json_path):
         print(f"[ERROR] 평가에 사용될 파일 {eval_json_path}가 없어서 진행할 수 없습니다.")
-        return
+        return []
 
-    # 2. 평가 데이터셋 로드 (전체 원본)
     raw_eval_data_all = load_jsonl_to_list(eval_json_path)
 
+    # 2. PyTorch device 설정 (CPU Only)
+    device = torch.device("cpu")
+    print(f"[INFO] 평가 장치: {device}")
+
     for judge_type, text_a_key, text_b_key, label_key in JUDGE_TASKS:
+        judge_lower = judge_type.lower()
+
         # 3. 모델 경로 생성 및 확인 (규칙: config.MODEL_DIR/judge_type)
         model_path = os.path.join(config.MODEL_DIR, judge_type)
         if not os.path.exists(model_path):
@@ -120,13 +139,11 @@ def evaluate_judges():
         print(f"[INFO] 모델 경로: {model_path}")
 
         try:
-            # 4. Pipeline 로드 (CPU 명시: accelerate 오류 회피)
-            qa_pipeline = pipeline(
-                "text-classification",
-                model=model_path,
-                tokenizer=model_path,
-                device=-1,  # CPU Only 환경 명시
-            )
+            # 4. 모델 및 토크나이저 로드
+            model = MODEL_CLS.from_pretrained(model_path, num_labels=2, trust_remote_code=True)
+            tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+            model.to(device)  # 모델을 CPU로 이동
+            model.eval()  # 평가 모드로 설정 (필수)
 
             # 5. 평가 데이터 준비 및 필터링
             eval_dataset_full = prepare_dataset(raw_eval_data_all, text_a_key, text_b_key, label_key)
@@ -138,53 +155,99 @@ def evaluate_judges():
                 return isinstance(text_a_val, str) and isinstance(text_b_val,
                                                                   str) and text_a_val.strip() != "" and text_b_val.strip() != ""
 
-            # 필터링된 데이터셋 (유효한 데이터만 남음)
             eval_dataset = eval_dataset_full.filter(is_valid_text)
 
             initial_eval_size = len(eval_dataset_full)
-            print(
-                f"[INFO] 평가 데이터 필터링: {initial_eval_size}개 -> {len(eval_dataset)}개 (제거됨: {initial_eval_size - len(eval_dataset)}개)")
+            valid_size = len(eval_dataset)
+            print(f"[INFO] 평가 데이터 필터링: {initial_eval_size}개 -> {valid_size}개 (제거됨: {initial_eval_size - valid_size}개)")
 
-            # 6. 예측 입력 생성 및 예측 실행
-            test_texts = [
-                (row['text_a'], row['text_b'])
-                for row in eval_dataset
-            ]
+            # 6. 토큰화 및 DataLoader 준비
 
-            # 예측 수행 (Pipeline)
-            print(f"[INFO] {judge_type} 예측 시작...")
-            predictions = qa_pipeline(
-                test_texts,
-                truncation=True,
-                padding='max_length',
-                max_length=MAX_SEQ_LENGTH,
-                batch_size=EVAL_BATCH_SIZE  # 배치 사이즈 사용
+            # 토큰화 함수 (PyTorch Tensor 반환)
+            def tokenize_data(examples):
+                tokenized = tokenizer(
+                    examples['text_a'], examples.get('text_b', None),
+                    truncation=True, max_length=MAX_SEQ_LENGTH, padding='max_length',
+                    return_tensors='pt'
+                )
+                # 토큰화 결과의 [1, MAX_SEQ_LENGTH] 형태를 [MAX_SEQ_LENGTH]로 squeeze 합니다.
+                return {k: v.squeeze(0) for k, v in tokenized.items()}
+
+            # 데이터셋을 토큰화 (map의 batched=False는 데이터 무결성을 유지하는 데 유리)
+            eval_tokenized = eval_dataset.map(tokenize_data, batched=False, remove_columns=['text_a', 'text_b'])
+
+            # 🌟 [수정 시작: NumPy를 통한 안전한 텐서 추출] 🌟
+
+            # 1. datasets.Dataset을 NumPy 배열로 변환하여 Column 객체를 해제
+            input_ids_np = np.array(eval_tokenized['input_ids'])
+            attention_mask_np = np.array(eval_tokenized['attention_mask'])
+            labels_np = np.array(eval_tokenized['labels'])
+
+            # 2. NumPy 배열을 PyTorch 텐서로 변환
+            input_ids = torch.tensor(input_ids_np).to(torch.long)
+            attention_mask = torch.tensor(attention_mask_np).to(torch.long)
+            labels = torch.tensor(labels_np).to(torch.long)
+
+            # 3. token_type_ids 처리
+            if 'token_type_ids' in eval_tokenized.column_names:
+                token_type_ids_np = np.array(eval_tokenized['token_type_ids'])
+                token_type_ids = torch.tensor(token_type_ids_np).to(torch.long)
+
+                # PyTorch Dataset 객체 생성 (4개의 텐서)
+                eval_data = TensorDataset(input_ids, attention_mask, token_type_ids, labels)
+            else:
+                # PyTorch Dataset 객체 생성 (3개의 텐서)
+                eval_data = TensorDataset(input_ids, attention_mask, labels)
+
+            # 🌟 [수정 끝] 🌟
+
+            eval_dataloader = DataLoader(
+                eval_data,
+                sampler=SequentialSampler(eval_data),
+                batch_size=EVAL_BATCH_SIZE
             )
 
-            # 7. 예측 결과와 레이블 개수 보정 (핵심 수정)
+            # 7. 추론 실행 (수동 배치 처리)
+            y_pred_list = []
+            y_true_list = []
 
-            # 예측 결과 (y_pred) 생성
-            y_pred_labels = [int(p['label'].split('_')[-1]) for p in predictions]
-            y_pred = np.array(y_pred_labels)
+            print(f"[INFO] {judge_type} 예측 시작 ({len(eval_dataloader)} 배치)")
 
-            # 정답 레이블 (y_true) 추출
-            y_true_full = np.array(eval_dataset['labels'])
+            for batch in eval_dataloader:
+                # 데이터를 CPU로 이동 (GPU가 없으므로)
+                batch = tuple(t.to(device) for t in batch)
 
-            # 🌟 [레이블 재구성 로직: 개수 불일치 문제 해결] 🌟
-            len_true = len(y_true_full)
-            len_pred = len(y_pred)
+                # token_type_ids가 있을 경우 inputs에 추가
+                inputs = {
+                    'input_ids': batch[0],
+                    'attention_mask': batch[1],
+                }
 
-            min_len = min(len_true, len_pred)
+                # TensorDataset에 token_type_ids가 포함되면 batch[2]에, 아니면 labels는 batch[2]
+                if len(batch) == 4:
+                    inputs['token_type_ids'] = batch[2]
+                    labels = batch[3].cpu().numpy()
+                else:
+                    labels = batch[2].cpu().numpy()
 
-            # 두 배열의 길이를 더 작은 쪽에 맞춰 자릅니다.
-            y_true_adjusted = y_true_full[:min_len]
-            y_pred_adjusted = y_pred[:min_len]
+                with torch.no_grad():
+                    outputs = model(**inputs)
 
-            if len_true != len_pred:
-                print(f"[WARN] 예측/레이블 개수 불일치 발생 ({len_true} vs {len_pred}). {min_len}개에 맞춰 평가합니다.")
+                logits = outputs.logits.cpu().numpy()
+                predictions = np.argmax(logits, axis=1)
 
-            # 8. 지표 계산
-            metrics = compute_metrics(y_true_adjusted, y_pred_adjusted)
+                y_pred_list.extend(predictions)
+                y_true_list.extend(labels)
+
+            # 8. 지표 계산 (개수 불일치 오류 발생 가능성 없음)
+            y_true_final = np.array(y_true_list)
+            y_pred_final = np.array(y_pred_list)
+
+            # 최종 유효 데이터 개수 확인
+            if len(y_true_final) != valid_size:
+                print(f"[WARN] 예측/레이블 개수 불일치 발생! (예측: {len(y_pred_final)}, 기대: {valid_size})")
+
+            metrics = compute_metrics(y_true_final, y_pred_final)
 
             result = {
                 'Judge': judge_type,
@@ -194,7 +257,7 @@ def evaluate_judges():
             }
             all_results.append(result)
 
-            print(f"[RESULT] {judge_type} F1 Score: {result['F1-Score']:.4f}, Accuracy: {result['Accuracy']:.4f}")
+            print(f"[RESULT] {judge_type} F1 Score: {result['F1-Score']:.4f}, Accuracy = {result['Accuracy']:.4f}")
 
         except Exception as e:
             print(f"[ERROR] {judge_type} 모델 평가 중 오류 발생: {e}")
@@ -215,7 +278,11 @@ def evaluate_judges():
 
 
 if __name__ == "__main__":
-    final_metrics = evaluate_judges()
+    # ⚠️ NOTE: 이 섹션은 config 모듈이 정의되어 있고,
+    # 필요한 데이터와 모델이 경로에 있다고 가정하고 실행됩니다.
 
-    if final_metrics:
-        print("\n[SUCCESS] 단일 모델 평가 성공적으로 완료.")
+    final_metrics = evaluate_judges()
+    if not final_metrics:
+        print(f"{final_metrics}")
+
+    print("최종 평가 함수가 정의되었습니다. config 모듈과 함께 실행해주세요.")
