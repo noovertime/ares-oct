@@ -1,4 +1,6 @@
-import json
+#
+# 학습 데이터 균형있게 나누기
+#
 import pandas as pd
 import os
 import time

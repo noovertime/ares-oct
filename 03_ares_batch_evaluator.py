@@ -1,4 +1,4 @@
-# ares_batch_evaluator.py (상수 최적화 최종 버전)
+# 03_ares_batch_evaluator.py (상수 최적화 최종 버전)
 
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
@@ -10,7 +10,7 @@ from tqdm import tqdm
 import logging
 
 import config
-import ares_batch_report_util
+import util_report_generator
 from config import (
     KEY_CR,
     KEY_AF,
