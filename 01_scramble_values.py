@@ -26,13 +26,19 @@ class ExtractType(Enum):
     NEGATIVE = 3  # 부정 최대화 (긍정 최소 0%~5%만 포함 가능성 있음)
 
 
-# **사용자 지정 변수:** 추출 스타일 (여기서 값을 변경하여 사용)
-EXTRACT_STYLE = ExtractType.BALANCE
-
+# 추출 스타일
+EXTRACT_STYLE = ExtractType.POSITIVE
+# 추출 비율
 GOLDEN_RATIO = 0.05
 EXTRACT_RATIO = 0.50  # RAG 샘플 추출 비율을 50%로 상향 조정
 MIN_GOLDEN_COUNT = 100  # 골든셋 최소 확보 목표
 MIN_NEGATIVE_RATIO_POS = 0.10  # POSITIVE 스타일에서 최소 부정 비율
+
+# 오답 생성비율
+SWAP_A_MIN_RATE = 0.10
+SWAP_A_MAX_RATE = 0.10
+SWAP_C_MIN_RATE = 0.20
+SWAP_C_MAX_RATE = 0.20
 
 
 def load_data(file_path: str) -> List[Dict[str, Any]]:
@@ -67,8 +73,8 @@ def save_data(data: List[Dict[str, Any]], file_path: str, keys_to_keep: List[str
                 f.write(json.dumps(item, ensure_ascii=False) + '\n')
 
 
+# **수정: swap_values 함수를 원래의 인자 구조로 복원하고, 랜덤 비율을 사용하도록 수정**
 def swap_values(data: List[Dict[str, Any]], key: str, min_rate: float, max_rate: float):
-    # ... (swap_values 함수 내용 변경 없음) ...
     """
     데이터 리스트 내에서 특정 키(key)의 값을 무작위로 추출된 비율만큼 서로 교환합니다.
     (단, 두 값이 서로 다른 경우에만 교환을 진행합니다.)
@@ -77,14 +83,23 @@ def swap_values(data: List[Dict[str, Any]], key: str, min_rate: float, max_rate:
     if data_size < 2:
         return
 
+    # **수정:** 무작위 비율(0.0~1.0)을 사용하도록 복원
     swap_rate = random.uniform(min_rate, max_rate)
-    # 시도할 횟수는 짝수여야 합니다.
+
+    # 시도할 횟수는 짝수여야 합니다. (교환 쌍)
+    # num_pairs_to_attempt가 data_size보다 커지는 것을 방지하기 위해 swap_rate는 1.0을 넘지 않아야 합니다.
+    # 하지만 이미 min_rate, max_rate가 1.0 이하이므로 문제가 없습니다.
     num_pairs_to_attempt = math.floor(data_size * swap_rate / 2) * 2
 
+    # num_pairs_to_attempt가 데이터 크기를 초과하지 않도록 안전 장치 추가
+    num_pairs_to_attempt = min(num_pairs_to_attempt, data_size)
+
     if num_pairs_to_attempt < 2:
+        print(f"  > '{key}' 값 교환 시도 ({swap_rate * 100:.2f}%): 교환 가능한 항목이 부족합니다 (0쌍).")
         return
 
     # 교환에 시도할 무작위 인덱스 추출 (비복원 추출)
+    # num_pairs_to_attempt가 짝수여야 random.sample 실행 가능
     swap_indices = random.sample(range(data_size), num_pairs_to_attempt)
 
     actual_swaps = 0
@@ -160,7 +175,6 @@ def print_statistics(title: str, data: List[Dict[str, Any]]):
     output_lines.append("=" * 50)
 
     # 비율 계산 및 출력 포맷팅
-    # 헤더 너비 조정 (비율까지 포함하여 약 15자리로 충분히 확보)
     output_lines.append("| 평가 유형 | '0' 개수 (부정) | '1' 개수 (긍정) |")
     output_lines.append("|:---------|:----------------|:----------------|")
 
@@ -349,30 +363,27 @@ def generate_samples():
     temp_rag_samples = sampled_pos + sampled_neg
     random.shuffle(temp_rag_samples)
 
-    # 6. RAG 데이터에 ID 부여
-    for item in temp_rag_samples:
-        item['id'] = str(uuid.uuid4())
-    print(f"\n[준비] RAG 최종 샘플 {len(temp_rag_samples)}개에 고유 ID(UUID)를 부여했습니다.")
-
     # 7. GOLDEN 샘플 추출 및 파일 저장 (통계 출력을 위해 먼저 추출)
     # RAG 샘플에서 GOLDEN 목표 수만큼 추출합니다.
     golden_samples = random.sample(temp_rag_samples, golden_size)
 
-    # 8. GOLDEN 데이터셋 통계 출력 (수정된 부분: temp_rag_samples -> golden_samples)
+    # 8. GOLDEN 데이터셋 통계 출력
     print_statistics("[GOLDEN 데이터셋 통계 정보]", golden_samples)
 
-    golden_output_name = f"{PREPARE_OUT_PREFIX}_golden.jsonl"
+    # 저장
+    golden_output_name = f"{EXTRACT_STYLE.name}_golden.jsonl"
     save_data(golden_samples, golden_output_name)
     print("GOLDEN 데이터 저장이 완료되었습니다. (오류 없음)")
 
     # 9. RAG 샘플 오류 주입 (RAG 샘플 전체 대상)
-    print("\n--- RAG 샘플 오류 주입 시작 (Negative Sampling) ---")
+    print("\n--- RAG 샘플 오류 주입 시작 ---")
 
+    # **수정:** swap_values에 min/max 비율 인자를 다시 전달
     # 오류 응답을 생성하기 위한 값 바꾸기 (a 값 교환: 3% ~ 10%)
-    swap_values(temp_rag_samples, key='a', min_rate=0.03, max_rate=0.10)
+    swap_values(temp_rag_samples, key='a', min_rate=SWAP_A_MIN_RATE, max_rate=SWAP_A_MAX_RATE)
 
     # 오류 응답을 생성하기 위한 값 바꾸기 (c 값 교환: 0% ~ 10%)
-    swap_values(temp_rag_samples, key='c', min_rate=0.00, max_rate=0.10)
+    swap_values(temp_rag_samples, key='c', min_rate=SWAP_C_MIN_RATE, max_rate=SWAP_C_MAX_RATE)
 
     print("--- RAG 샘플 오류 주입 완료 ---\n")
 
@@ -382,8 +393,8 @@ def generate_samples():
     # RAG 샘플 (오류 주입 완료) 통계 출력 (대상: rag_samples, 크기: 176건)
     print_statistics("[오류 주입된 RAG 샘플 데이터셋 통계 정보]", rag_samples)
 
-    # RAG 데이터 저장 (id, q, c, a 만 남김) -> 판단 라벨 삭제
-    rag_output_name = f"{PREPARE_OUT_PREFIX}_rag.jsonl"
+    # 저장
+    rag_output_name = f"{EXTRACT_STYLE.name}_rag.jsonl"
     save_data(rag_samples, rag_output_name, keys_to_keep=['id', 'q', 'c', 'a'])
 
 

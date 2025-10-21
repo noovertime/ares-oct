@@ -106,13 +106,17 @@ def evaluate_judges():
 
     # 모델 클래스 결정 (MODEL_NAME에 따라 동적 결정)
     model_name_lower = config.MODEL_NAME.lower()
-    if "distil" in model_name_lower:
+
+    is_distilbert = "distil" in model_name_lower  # 🌟 DistilBERT 여부 플래그
+
+    if is_distilbert:
         MODEL_CLS = DistilBertForSequenceClassification
     elif "bert" in model_name_lower or "klue" in model_name_lower:
         MODEL_CLS = AutoModelForSequenceClassification
     else:
         MODEL_CLS = AutoModelForSequenceClassification
     print(f"[INFO] 모델 클래스: {MODEL_CLS.__name__}")
+    print(f"[INFO] DistilBERT 모드: {is_distilbert}")
 
     # 1. 평가용 파일 경로 설정 및 확인
     eval_json_path = os.path.join(config.DATA_EVAL_DIR, config.DATA_EVAL_FILE_NAME)
@@ -142,13 +146,13 @@ def evaluate_judges():
             # 4. 모델 및 토크나이저 로드
             model = MODEL_CLS.from_pretrained(model_path, num_labels=2, trust_remote_code=True)
             tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-            model.to(device)  # 모델을 CPU로 이동
-            model.eval()  # 평가 모드로 설정 (필수)
+            model.to(device)
+            model.eval()
 
             # 5. 평가 데이터 준비 및 필터링
             eval_dataset_full = prepare_dataset(raw_eval_data_all, text_a_key, text_b_key, label_key)
 
-            # 필터링 로직 (유효하지 않은 문자열 제거)
+            # 필터링 로직
             def is_valid_text(example):
                 text_a_val = example.get('text_a')
                 text_b_val = example.get('text_b')
@@ -170,36 +174,38 @@ def evaluate_judges():
                     truncation=True, max_length=MAX_SEQ_LENGTH, padding='max_length',
                     return_tensors='pt'
                 )
-                # 토큰화 결과의 [1, MAX_SEQ_LENGTH] 형태를 [MAX_SEQ_LENGTH]로 squeeze 합니다.
                 return {k: v.squeeze(0) for k, v in tokenized.items()}
 
-            # 데이터셋을 토큰화 (map의 batched=False는 데이터 무결성을 유지하는 데 유리)
             eval_tokenized = eval_dataset.map(tokenize_data, batched=False, remove_columns=['text_a', 'text_b'])
 
-            # 🌟 [수정 시작: NumPy를 통한 안전한 텐서 추출] 🌟
+            # 7. NumPy를 통한 안전한 텐서 추출
 
             # 1. datasets.Dataset을 NumPy 배열로 변환하여 Column 객체를 해제
-            input_ids_np = np.array(eval_tokenized['input_ids'])
-            attention_mask_np = np.array(eval_tokenized['attention_mask'])
-            labels_np = np.array(eval_tokenized['labels'])
+            # 텐서에 포함될 컬럼 리스트 초기화
+            tensor_np_cols = ['input_ids', 'attention_mask']
+            if not is_distilbert and 'token_type_ids' in eval_tokenized.column_names:
+                tensor_np_cols.append('token_type_ids')
 
-            # 2. NumPy 배열을 PyTorch 텐서로 변환
-            input_ids = torch.tensor(input_ids_np).to(torch.long)
-            attention_mask = torch.tensor(attention_mask_np).to(torch.long)
-            labels = torch.tensor(labels_np).to(torch.long)
+            eval_tokenized.set_format(type='numpy', columns=tensor_np_cols + ['labels'])
 
-            # 3. token_type_ids 처리
-            if 'token_type_ids' in eval_tokenized.column_names:
-                token_type_ids_np = np.array(eval_tokenized['token_type_ids'])
-                token_type_ids = torch.tensor(token_type_ids_np).to(torch.long)
-
-                # PyTorch Dataset 객체 생성 (4개의 텐서)
-                eval_data = TensorDataset(input_ids, attention_mask, token_type_ids, labels)
-            else:
-                # PyTorch Dataset 객체 생성 (3개의 텐서)
-                eval_data = TensorDataset(input_ids, attention_mask, labels)
-
+            # 🌟 [수정 시작]: torch.tensor() 대신 np.array()를 거쳐 하나의 텐서로 변환 🌟
+            input_ids = torch.tensor(np.array(eval_tokenized['input_ids'])).to(torch.long)
+            attention_mask = torch.tensor(np.array(eval_tokenized['attention_mask'])).to(torch.long)
+            labels = torch.tensor(np.array(eval_tokenized['labels'])).to(torch.long)
             # 🌟 [수정 끝] 🌟
+
+            # 8. TensorDataset 객체 생성 (DistilBERT 조건 반영)
+            if not is_distilbert and 'token_type_ids' in eval_tokenized.column_names:
+                # DistilBERT가 아닐 때만 token_type_ids 사용
+                token_type_ids = torch.tensor(np.array(eval_tokenized['token_type_ids'])).to(torch.long)
+                eval_data = TensorDataset(input_ids, attention_mask, token_type_ids, labels)
+                is_token_type_used = True
+            else:
+                # DistilBERT이거나 (사용하지 않음), token_type_ids 컬럼이 없으면 사용하지 않음
+                eval_data = TensorDataset(input_ids, attention_mask, labels)
+                is_token_type_used = False
+
+            print(f"[INFO] token_type_ids 사용 여부: {is_token_type_used}")
 
             eval_dataloader = DataLoader(
                 eval_data,
@@ -207,27 +213,29 @@ def evaluate_judges():
                 batch_size=EVAL_BATCH_SIZE
             )
 
-            # 7. 추론 실행 (수동 배치 처리)
+            # 9. 추론 실행 (수동 배치 처리)
             y_pred_list = []
             y_true_list = []
 
             print(f"[INFO] {judge_type} 예측 시작 ({len(eval_dataloader)} 배치)")
 
             for batch in eval_dataloader:
+                print(".", end='')  # 아무것도 안 보이면 답답하니까
                 # 데이터를 CPU로 이동 (GPU가 없으므로)
                 batch = tuple(t.to(device) for t in batch)
 
-                # token_type_ids가 있을 경우 inputs에 추가
                 inputs = {
                     'input_ids': batch[0],
                     'attention_mask': batch[1],
                 }
 
-                # TensorDataset에 token_type_ids가 포함되면 batch[2]에, 아니면 labels는 batch[2]
-                if len(batch) == 4:
+                # TensorDataset에 token_type_ids가 포함된 경우
+                if is_token_type_used:
                     inputs['token_type_ids'] = batch[2]
                     labels = batch[3].cpu().numpy()
                 else:
+                    # token_type_ids가 없는 경우 (DistilBERT 포함)
+                    # labels는 batch[2]에 위치
                     labels = batch[2].cpu().numpy()
 
                 with torch.no_grad():
@@ -239,13 +247,13 @@ def evaluate_judges():
                 y_pred_list.extend(predictions)
                 y_true_list.extend(labels)
 
-            # 8. 지표 계산 (개수 불일치 오류 발생 가능성 없음)
+            # 10. 지표 계산
             y_true_final = np.array(y_true_list)
             y_pred_final = np.array(y_pred_list)
 
             # 최종 유효 데이터 개수 확인
             if len(y_true_final) != valid_size:
-                print(f"[WARN] 예측/레이블 개수 불일치 발생! (예측: {len(y_pred_final)}, 기대: {valid_size})")
+                print(f"\n[WARN] 예측/레이블 개수 불일치 발생! (예측: {len(y_pred_final)}, 기대: {valid_size})")
 
             metrics = compute_metrics(y_true_final, y_pred_final)
 
@@ -257,13 +265,13 @@ def evaluate_judges():
             }
             all_results.append(result)
 
-            print(f"[RESULT] {judge_type} F1 Score: {result['F1-Score']:.4f}, Accuracy = {result['Accuracy']:.4f}")
+            print(f"\n[RESULT] {judge_type} F1 Score: {result['F1-Score']:.4f}, Accuracy = {result['Accuracy']:.4f}")
 
         except Exception as e:
-            print(f"[ERROR] {judge_type} 모델 평가 중 오류 발생: {e}")
+            print(f"\n[ERROR] {judge_type} 모델 평가 중 오류 발생: {e}")
             all_results.append({'Judge': judge_type, 'Error': str(e), 'Path': model_path})
 
-    # 9. 최종 결과 요약 출력
+    # 11. 최종 결과 요약 출력
     print("\n=============================================")
     print("✅ 디렉토리 평가 최종 요약")
     print("=============================================")
@@ -278,11 +286,6 @@ def evaluate_judges():
 
 
 if __name__ == "__main__":
-    # ⚠️ NOTE: 이 섹션은 config 모듈이 정의되어 있고,
-    # 필요한 데이터와 모델이 경로에 있다고 가정하고 실행됩니다.
-
     final_metrics = evaluate_judges()
     if not final_metrics:
         print(f"{final_metrics}")
-
-    print("최종 평가 함수가 정의되었습니다. config 모듈과 함께 실행해주세요.")
