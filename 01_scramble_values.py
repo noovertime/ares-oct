@@ -411,7 +411,7 @@ def generate_samples():
 
     # 10. RAG 데이터 최종 저장 (공통 샘플을 rag_subset.jsonl로 저장)
     rag_samples_subset = common_rag_samples
-    rag_output_name = f"{EXTRACT_STYLE.name}_rag_subset.jsonl"
+    rag_output_name = f"{EXTRACT_STYLE.name}_rag.jsonl"
     save_data(rag_samples_subset, rag_output_name, keys_to_keep=['id', 'q', 'c', 'a'])
     print("Subset 데이터 저장이 완료되었습니다. (오류 없음)")
 
@@ -432,14 +432,14 @@ def generate_samples():
     golden_output_name_ex = f"{EXTRACT_STYLE.name}_golden_mutually_ex.jsonl"
     save_data(golden_ex_candidates, golden_output_name_ex)
 
-    # 13. RAG 데이터 최종 저장 (공통 샘플을 rag_mutually_ex.jsonl로 저장)
-    # rag_subset과 동일한 내용을 저장하여 "평가셋은 같은 내용"이라는 요구사항을 충족합니다.
-    rag_samples_ex = common_rag_samples
-    rag_output_name_ex = f"{EXTRACT_STYLE.name}_rag_mutually_ex.jsonl"
-    save_data(rag_samples_ex, rag_output_name_ex, keys_to_keep=['id', 'q', 'c', 'a'])
-    print("Mutually Exclusive 데이터 저장이 완료되었습니다. (오류 없음)")
-
-    print("\n**두 시나리오의 RAG 평가셋 (rag_subset.jsonl, rag_mutually_ex.jsonl) 내용이 동일합니다.**")
+    #
+    # # 13. RAG 데이터 최종 저장 (공통 샘플을 rag_mutually_ex.jsonl로 저장)
+    # # rag_subset과 동일한 내용을 저장하여 "평가셋은 같은 내용"이라는 요구사항을 충족합니다.
+    # rag_samples_ex = common_rag_samples
+    # rag_output_name_ex = f"{EXTRACT_STYLE.name}_rag_mutually_ex.jsonl"
+    # save_data(rag_samples_ex, rag_output_name_ex, keys_to_keep=['id', 'q', 'c', 'a'])
+    # print("Mutually Exclusive 데이터 저장이 완료되었습니다. (오류 없음)")
+    #print("\n**두 시나리오의 RAG 평가셋 (rag_subset.jsonl, rag_mutually_ex.jsonl) 내용이 동일합니다.**")
 
 
 if __name__ == "__main__":
