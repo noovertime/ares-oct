@@ -1,27 +1,22 @@
-# ARES 보고서 생성
-from __future__ import annotations
-
 import time
-from typing import Dict, List, Any
-
+from typing import Dict, Any, List
 from config import KEY_CR, KEY_AF, KEY_AR
 
 
-# ===================================================================
-# 보고서 생성
-# ===================================================================
-
-def generate_summary_report(golden_set_markdown:str, model_summaries: List[Dict[str, Any]]) -> str:
-    """Markdown 형식 보고서 생성 (요청된 마크다운/HTML 테이블 형식 적용)."""
+def generate_summary_report(golden_markdown_map: Dict[str, str], model_summaries: List[Dict[str, Any]]) -> str:
+    """
+    Markdown 형식 보고서 생성.
+    다중 골든셋 통계 (golden_markdown_map)와 다중 보정 결과 (model_summaries)를 처리합니다.
+    """
     if not model_summaries:
         return "[WARN] 분석할 모델 데이터가 없습니다."
 
     # 'overall' 점수를 기준으로 내림차순 정렬
     model_summaries.sort(key=lambda x: float(x["overall"]), reverse=True)
     current_time: str = time.strftime("%Y-%m-%d %H:%M:%S")
-    # 모든 모델이 동일한 골든셋을 사용한다고 가정하고 첫 번째 모델의 labeled_n_rep 사용
-    total_golden_set_count: int = int(model_summaries[0]["labeled_n_rep"])
-    model_list: str = "\n".join([f"   - {m['model_name']}" for m in model_summaries])
+
+    # 🚨 주의: 'labeled_n_rep'은 CR 축의 labeled_n을 대표값으로 사용하므로, 이 섹션은 단순화합니다.
+    model_list: str = "\n".join([f"   - {m['model_name']} (vs. {m['golden_set_name']})" for m in model_summaries])
 
     # -------------------------------------------------------------
     # 1. 보고서 기본 정보 섹션
@@ -34,9 +29,8 @@ def generate_summary_report(golden_set_markdown:str, model_summaries: List[Dict[
 ### 1️⃣ 프로젝트 개요 
 - 프로젝트명: ARES 심사관 로컬 배치 평가
 - 평가 프레임워크: Stanford ARES (골든셋 기반 PPI 보정 로직 통합)
-- 평가 대상 : (q, c, a) 트리플 셋으로 구성 <br>
+- 평가 대상 (조합) : 평가셋(QCA) * 골든셋(보정통계) 트리플 셋으로 구성 <br>
 {model_list}
-- 골든셋 유효 개수 (n) : {total_golden_set_count}
 
 --- 
 ### 2️⃣ 평가 
@@ -48,20 +42,21 @@ def generate_summary_report(golden_set_markdown:str, model_summaries: List[Dict[
 ### 3️⃣ PPI 추정 성능 점수
 #### 🎯 성능점수 요약 
 
-| 순번 | 평가대상 | 종합 점수 | CR(보정) | AF(보정) | AR(보정)|
-|:--|:---:|:---:|:---:|:---:|:---:|
+| 순번 | 평가대상 | 적용 골든셋 | 종합 점수 | CR(보정) | AF(보정) | AR(보정)|
+|:--|:---:|:---:|:---:|:---:|:---:|:---:|
 """
     # -------------------------------------------------------------
-    # 2. 요약 테이블 (마크다운)
+    # 2. 요약 테이블 (마크다운) - 올바른 키 사용
     # -------------------------------------------------------------
     for i, summary in enumerate(model_summaries):
         report_content += (
             f"| {i + 1} "
             f"| {summary['model_name']} "
-            f"| {summary['overall']:.2f} "
-            f"| {summary[KEY_CR]['corrected_mean']:.2f} "
-            f"| {summary[KEY_AF]['corrected_mean']:.2f} "
-            f"| {summary[KEY_AR]['corrected_mean']:.2f} |\n"
+            f"| {summary['golden_set_name']} "
+            f"| {summary['overall']:.2f} "  # 종합 점수
+            f"| {summary[KEY_CR]['corrected_mean']:.2f} "  # CR(보정)
+            f"| {summary[KEY_AF]['corrected_mean']:.2f} "  # AF(보정)
+            f"| {summary[KEY_AR]['corrected_mean']:.2f} |\n"  # AR(보정)
         )
 
     report_content += """
@@ -81,6 +76,7 @@ def generate_summary_report(golden_set_markdown:str, model_summaries: List[Dict[
     <tr>
         <td rowspan="2">순번</td>
         <td rowspan="2">평가대상</td>
+        <td rowspan="2">골든셋</td>
         <td colspan="3" align="center">CR</td>
         <td colspan="3" align="center">AF</td>
         <td colspan="3" align="center">AR</td>
@@ -102,19 +98,22 @@ def generate_summary_report(golden_set_markdown:str, model_summaries: List[Dict[
   <tbody>
 """
     # -------------------------------------------------------------
-    # 3. 세부내용 테이블 (HTML)
+    # 3. 세부내용 테이블 (HTML) - 올바른 키 사용
     # -------------------------------------------------------------
     for i, summary in enumerate(model_summaries):
-        cr = summary[KEY_CR]
-        af = summary[KEY_AF]
-        ar = summary[KEY_AR]
+        # 🚨 수정: 축 통계를 올바른 키로 조회
+        cr = summary[KEY_CR]  # 'contextrelevance'
+        af = summary[KEY_AF]  # 'answerfaithfulness'
+        ar = summary[KEY_AR]  # 'answerrelevance'
 
         # 모델의 모든 기계 예측 평균 (CR 축의 machine_mean 사용)
         model_machine_mean: float = cr['machine_mean']
+        golden_set_name: str = summary['golden_set_name']
 
         report_content += "    <tr>\n"
         report_content += f"        <td>{i + 1}</td>\n"
         report_content += f"        <td>{summary['model_name']}</td>\n"
+        report_content += f"        <td>{golden_set_name}</td>\n"
 
         # CR
         report_content += f"        <td>{cr['corrected_mean']:.2f}</td>\n"
@@ -143,7 +142,7 @@ def generate_summary_report(golden_set_markdown:str, model_summaries: List[Dict[
 
     📝 의미 요약 
     * CR/AR/AF(보정) : 문맥 적합성(CR), 응답 충실도(AF), 응답 적절성(AR) 성능 추정치 ( 0 ~ 1 : 최고점 ) 
-    * 편향 : ARES 심사관의 예측과 골든라벨의 평균 차이 ( 작을수록 좋음 )
+    * 편향 : ARES 심사관의 예측과 골든라벨의 평균 차이. 부호에 상관없이 0에 가까울수록 심사관의 평가가 인간평가(골든라벨)과 같음을 의미.
     * CI : CR/AR/AF(보정) 값의 신뢰구간 ( 작을수록 좋음 )
     * 심사관 예측평균 : ARES 심사관이 부여한 평균 점수 
     * 총 샘플 수 : 평가에 사용된 Q-C-A 트리플의 전체 개수
@@ -175,13 +174,22 @@ def generate_summary_report(golden_set_markdown:str, model_summaries: List[Dict[
     * CR/AF/AR 항목을 평가한 점수의 평균
     * PPI 보정의 입력값이며 편향이 포함되어 있어 이 값만으로는 모델 성능을 대표하지 않음
     * 보정을 거친 후에 CR/AF/AR 보정값으로 표현됨 
-    
-    
+
+
 ---
 ### 5️⃣ 참고자료 
-* 골든셋 통계 
 """
 
-    report_content += f"{golden_set_markdown}"
-    return report_content
+    # -------------------------------------------------------------
+    # 5. 참고자료 섹션 (다중 골든셋 마크다운 출력)
+    # -------------------------------------------------------------
+    for name, markdown_string in golden_markdown_map.items():
+        # 골든셋 이름 섹션을 추가합니다.
+        report_content += f"\n### 🔸 골든셋 통계: {name}\n"
 
+        # 이전 출력 오류와 KeyError를 모두 해결하는 수정 사항입니다.
+        report_content += markdown_string
+
+    report_content += "\n"
+
+    return report_content
