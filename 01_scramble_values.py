@@ -40,6 +40,10 @@ SWAP_A_MAX_RATE = 0.10
 SWAP_C_MIN_RATE = 0.20
 SWAP_C_MAX_RATE = 0.20
 
+# **수정: README 파일 이름 상수화**
+README_GOLDEN_FILE = "README_golden.txt"
+README_RAG_FILE = "README_rag.txt"
+
 
 def load_data(file_path: str) -> List[Dict[str, Any]]:
     """JSONL 파일에서 데이터를 로드합니다."""
@@ -73,7 +77,6 @@ def save_data(data: List[Dict[str, Any]], file_path: str, keys_to_keep: List[str
                 f.write(json.dumps(item, ensure_ascii=False) + '\n')
 
 
-# **수정: swap_values 함수를 원래의 인자 구조로 복원하고, 랜덤 비율을 사용하도록 수정**
 def swap_values(data: List[Dict[str, Any]], key: str, min_rate: float, max_rate: float):
     """
     데이터 리스트 내에서 특정 키(key)의 값을 무작위로 추출된 비율만큼 서로 교환합니다.
@@ -83,15 +86,11 @@ def swap_values(data: List[Dict[str, Any]], key: str, min_rate: float, max_rate:
     if data_size < 2:
         return
 
-    # **수정:** 무작위 비율(0.0~1.0)을 사용하도록 복원
+    # 무작위 비율(0.0~1.0)을 사용
     swap_rate = random.uniform(min_rate, max_rate)
 
-    # 시도할 횟수는 짝수여야 합니다. (교환 쌍)
-    # num_pairs_to_attempt가 data_size보다 커지는 것을 방지하기 위해 swap_rate는 1.0을 넘지 않아야 합니다.
-    # 하지만 이미 min_rate, max_rate가 1.0 이하이므로 문제가 없습니다.
+    # 시도할 횟수는 짝수 (교환 쌍)
     num_pairs_to_attempt = math.floor(data_size * swap_rate / 2) * 2
-
-    # num_pairs_to_attempt가 데이터 크기를 초과하지 않도록 안전 장치 추가
     num_pairs_to_attempt = min(num_pairs_to_attempt, data_size)
 
     if num_pairs_to_attempt < 2:
@@ -99,7 +98,6 @@ def swap_values(data: List[Dict[str, Any]], key: str, min_rate: float, max_rate:
         return
 
     # 교환에 시도할 무작위 인덱스 추출 (비복원 추출)
-    # num_pairs_to_attempt가 짝수여야 random.sample 실행 가능
     swap_indices = random.sample(range(data_size), num_pairs_to_attempt)
 
     actual_swaps = 0
@@ -124,6 +122,7 @@ def swap_values(data: List[Dict[str, Any]], key: str, min_rate: float, max_rate:
 def print_statistics(title: str, data: List[Dict[str, Any]]):
     """
     제공된 데이터 리스트의 평가 유형별 통계를 화면에 출력하고 파일로 저장합니다.
+    (파일 저장 시 기존 내용에 덧붙여(append) 저장하도록 수정)
     """
     if not data:
         print(f"\n[{title}] - 데이터가 없어 통계를 출력/저장할 수 없습니다.")
@@ -162,9 +161,9 @@ def print_statistics(title: str, data: List[Dict[str, Any]]):
 
     # 출력 제목에 따라 저장할 파일 이름을 결정합니다.
     if "GOLDEN" in title:
-        file_name = "README_golden.txt"
+        file_name = README_GOLDEN_FILE  # 상수 사용
     else:  # 오류 주입된 RAG 샘플
-        file_name = "README_rag.txt"  # tag 대신 rag로 통일 (RAG 샘플)
+        file_name = README_RAG_FILE  # 상수 사용
 
     output_lines = []
 
@@ -212,7 +211,8 @@ def print_statistics(title: str, data: List[Dict[str, Any]]):
     # 3. 파일 저장 (PREPARE_DIR에 저장)
     full_path = os.path.join(PREPARE_DIR, file_name)
     try:
-        with open(full_path, 'w', encoding='utf-8') as f:
+        # 'a' (append) 모드로 변경하여 기존 내용에 덧붙여 저장
+        with open(full_path, 'a', encoding='utf-8') as f:
             f.write(output_text)
         print(f"[알림] 통계 정보를 '{full_path}'에 저장했습니다.")
     except Exception as e:
@@ -317,7 +317,7 @@ def sample_negative_data(target_neg: int, categorized_data: Dict[str, List[Dict[
 
 
 def generate_samples():
-    """요청된 샘플링 및 오류 주입 로직을 실행합니다."""
+    """요청된 샘플링 및 오류 주입 로직을 실행합니다. (Mutually Exclusive & Subset 방식 모두 생성)"""
 
     # 1. 파일 로드 및 초기 설정
     raw_data = load_data(PREPARE_FILE_NAME)
@@ -326,19 +326,16 @@ def generate_samples():
 
     total_count = len(raw_data)
 
-    # **요청 사항 1: 원본 데이터가 100건 미만이면 추출 실패로 프로그램 종료**
+    # **원본 데이터 부족 시 프로그램 종료**
     if total_count < MIN_GOLDEN_COUNT:
         print(f"\n[오류] 전체 데이터 수({total_count}개)가 최소 골든셋 요구치({MIN_GOLDEN_COUNT}개) 미만입니다.")
         print("프로그램을 종료합니다.")
         sys.exit(1)
 
     # 2. 골든셋 및 RAG 추출 크기 결정 (최소 100건 보장 로직 포함)
-
-    # GOLDEN 샘플 크기 결정 (최소 100건)
     golden_size = max(int(total_count * GOLDEN_RATIO), MIN_GOLDEN_COUNT)
     golden_size = min(golden_size, total_count)
 
-    # RAG 추출 목표 수 (기본 50% 또는 golden_size)
     rag_extract_size_by_ratio = int(total_count * EXTRACT_RATIO)
     rag_extract_size = max(rag_extract_size_by_ratio, golden_size)
     rag_extract_size = min(rag_extract_size, total_count)
@@ -357,45 +354,92 @@ def generate_samples():
     print(f"- 목표 긍정 샘플 수: {target_pos}개 (가용 {len(categorized['positive'])}개)")
     print(f"- 목표 부정 샘플 수: {target_neg}개 (가용 {sum(len(v) for k, v in categorized.items() if k.startswith('neg'))}개)")
 
-    # 5. RAG 샘플 추출 (temp_rag_samples 생성)
+    # =========================================================================
+    # [공통 단계] RAG 평가 대상 항목 추출 및 오답 주입 (두 시나리오에 공통 사용)
+    # =========================================================================
+
+    # **수정: README 파일 초기화 로직 추가**
+    readme_files = [README_GOLDEN_FILE, README_RAG_FILE]
+
+    print("\n--- 기존 README 파일 삭제 시작 ---")
+    for file_name in readme_files:
+        full_path = os.path.join(PREPARE_DIR, file_name)
+        if os.path.exists(full_path):
+            os.remove(full_path)
+            print(f"  > 파일 삭제 완료: {file_name}")
+        else:
+            print(f"  > 파일 없음: {file_name} (삭제 건너뛰기)")
+    print("--- 기존 README 파일 삭제 완료 ---\n")
+
+    # 5. RAG 평가 대상 항목 추출 (temp_rag_samples 생성)
     sampled_pos = random.sample(categorized['positive'], target_pos)
     sampled_neg = sample_negative_data(target_neg, categorized)
-    temp_rag_samples = sampled_pos + sampled_neg
-    random.shuffle(temp_rag_samples)
 
-    # 7. GOLDEN 샘플 추출 및 파일 저장 (통계 출력을 위해 먼저 추출)
-    # RAG 샘플에서 GOLDEN 목표 수만큼 추출합니다.
-    golden_samples = random.sample(temp_rag_samples, golden_size)
+    # RAG 평가 대상 리스트 (두 시나리오에 공통 사용될 원본)
+    common_rag_samples = sampled_pos + sampled_neg
+    random.shuffle(common_rag_samples)
 
-    # 8. GOLDEN 데이터셋 통계 출력
-    print_statistics("[GOLDEN 데이터셋 통계 정보]", golden_samples)
+    # 6. RAG 데이터에 ID 부여
+    for item in common_rag_samples:
+        item['id'] = str(uuid.uuid4())
+    print(f"\n[공통] RAG 평가 대상 샘플 {len(common_rag_samples)}개에 고유 ID(UUID)를 부여했습니다.")
 
-    # 저장
-    golden_output_name = f"{EXTRACT_STYLE.name}_golden.jsonl"
-    save_data(golden_samples, golden_output_name)
-    print("GOLDEN 데이터 저장이 완료되었습니다. (오류 없음)")
+    # 7. 오답 주입 (두 시나리오의 RAG 평가셋에 모두 적용될 최종 상태)
+    print("\n--- 공통 RAG 샘플 오류 주입 시작 ---")
+    swap_values(common_rag_samples, key='a', min_rate=SWAP_A_MIN_RATE, max_rate=SWAP_A_MAX_RATE)
+    swap_values(common_rag_samples, key='c', min_rate=SWAP_C_MIN_RATE, max_rate=SWAP_C_MAX_RATE)
+    print("--- 공통 RAG 샘플 오류 주입 완료 ---\n")
 
-    # 9. RAG 샘플 오류 주입 (RAG 샘플 전체 대상)
-    print("\n--- RAG 샘플 오류 주입 시작 ---")
+    # RAG 평가셋 통계 출력 (오류 주입 완료된 최종 상태)
+    print_statistics("[공통 RAG 샘플 (오류 주입 후) 통계 정보]", common_rag_samples)
 
-    # **수정:** swap_values에 min/max 비율 인자를 다시 전달
-    # 오류 응답을 생성하기 위한 값 바꾸기 (a 값 교환: 3% ~ 10%)
-    swap_values(temp_rag_samples, key='a', min_rate=SWAP_A_MIN_RATE, max_rate=SWAP_A_MAX_RATE)
+    # =========================================================================
+    # [시나리오 2] 서브셋 (Subset) 데이터셋 생성 (기존 로직 유지)
+    # =========================================================================
+    print("\n\n" + "#" * 50)
+    print("## [1/2] Subset 데이터셋 생성 시작 (RAG 평가셋 공유) ##")
+    print("#" * 50)
 
-    # 오류 응답을 생성하기 위한 값 바꾸기 (c 값 교환: 0% ~ 10%)
-    swap_values(temp_rag_samples, key='c', min_rate=SWAP_C_MIN_RATE, max_rate=SWAP_C_MAX_RATE)
+    # 8. GOLDEN 샘플 추출 (Subset)
+    # ID와 오답 주입이 완료된 common_rag_samples에서 golden_size만큼 추출
+    golden_samples_subset = random.sample(common_rag_samples, golden_size)
 
-    print("--- RAG 샘플 오류 주입 완료 ---\n")
+    # 9. GOLDEN 데이터셋 통계 출력 및 저장
+    print_statistics("[Subset GOLDEN 데이터셋 통계 정보]", golden_samples_subset)
+    golden_output_name = f"{EXTRACT_STYLE.name}_golden_subset.jsonl"
+    save_data(golden_samples_subset, golden_output_name)
 
-    # 10. RAG 데이터 최종 저장 및 오류 주입 후 통계 출력
-    rag_samples = temp_rag_samples
+    # 10. RAG 데이터 최종 저장 (공통 샘플을 rag_subset.jsonl로 저장)
+    rag_samples_subset = common_rag_samples
+    rag_output_name = f"{EXTRACT_STYLE.name}_rag_subset.jsonl"
+    save_data(rag_samples_subset, rag_output_name, keys_to_keep=['id', 'q', 'c', 'a'])
+    print("Subset 데이터 저장이 완료되었습니다. (오류 없음)")
 
-    # RAG 샘플 (오류 주입 완료) 통계 출력 (대상: rag_samples, 크기: 176건)
-    print_statistics("[오류 주입된 RAG 샘플 데이터셋 통계 정보]", rag_samples)
+    # =========================================================================
+    # [시나리오 1] 상호 배제 (Mutually Exclusive) 데이터셋 생성
+    # =========================================================================
+    print("\n\n" + "#" * 50)
+    print("## [2/2] Mutually Exclusive 데이터셋 생성 시작 (RAG 평가셋 공유) ##")
+    print("#" * 50)
 
-    # 저장
-    rag_output_name = f"{EXTRACT_STYLE.name}_rag.jsonl"
-    save_data(rag_samples, rag_output_name, keys_to_keep=['id', 'q', 'c', 'a'])
+    # 11. GOLDEN 샘플 (Mutually Exclusive) 추출
+    # 원본 raw_data에서 golden_size만큼 추출
+    # raw_data에서 ID가 없는 원본 항목을 추출합니다. (RAG 평가셋과 겹칠 수 있으나, ID가 없어 추출 자체는 가능)
+    golden_ex_candidates = random.sample(raw_data, golden_size)
+
+    # 12. 통계 및 저장
+    print_statistics("[Mutually Exclusive GOLDEN 데이터셋 통계 정보]", golden_ex_candidates)
+    golden_output_name_ex = f"{EXTRACT_STYLE.name}_golden_mutually_ex.jsonl"
+    save_data(golden_ex_candidates, golden_output_name_ex)
+
+    # 13. RAG 데이터 최종 저장 (공통 샘플을 rag_mutually_ex.jsonl로 저장)
+    # rag_subset과 동일한 내용을 저장하여 "평가셋은 같은 내용"이라는 요구사항을 충족합니다.
+    rag_samples_ex = common_rag_samples
+    rag_output_name_ex = f"{EXTRACT_STYLE.name}_rag_mutually_ex.jsonl"
+    save_data(rag_samples_ex, rag_output_name_ex, keys_to_keep=['id', 'q', 'c', 'a'])
+    print("Mutually Exclusive 데이터 저장이 완료되었습니다. (오류 없음)")
+
+    print("\n**두 시나리오의 RAG 평가셋 (rag_subset.jsonl, rag_mutually_ex.jsonl) 내용이 동일합니다.**")
 
 
 if __name__ == "__main__":
