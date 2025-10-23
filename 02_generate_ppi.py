@@ -80,7 +80,7 @@ def cleanup_evaluation_data():
     """
     config에 정의된 PPI 출력 디렉토리와 최종 보고서 디렉토리 내의 모든 파일을 삭제합니다.
     """
-    dirs_to_clean = [config.DATA_OUT_DIR, config.DATA_REPORT_DIR]
+    dirs_to_clean = [ config.DATA_REPORT_DIR]
     print("\n>> 평가 및 보고서 출력 파일 정리 시작...")
     for target_dir in dirs_to_clean:
         if os.path.isdir(target_dir):
@@ -405,14 +405,12 @@ def run_ares_pipeline():
 
     # --- 1. 환경 설정 및 초기화 단계 ---
     INPUT_DIR = config.DATA_IN_DIR
-    OUTPUT_DIR = config.DATA_OUT_DIR
     REPORT_DIR = config.DATA_REPORT_DIR
     GOLDEN_DIR = config.DATA_GOLDEN_DIR
 
     os.makedirs(INPUT_DIR, exist_ok=True)
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
     os.makedirs(REPORT_DIR, exist_ok=True)
-    print(f"\n[SETUP] QCA 입력 디렉토리: {INPUT_DIR}, LM 예측 출력 디렉토리: {OUTPUT_DIR}")
+    print(f"\n[SETUP] 평가대상인 QCA 입력 디렉토리: {INPUT_DIR}")
 
     # 클래스 인스턴스 생성
     try:
@@ -452,9 +450,9 @@ def run_ares_pipeline():
             if stats:
                 golden_stats_map[golden_name] = stats
                 golden_markdown_map[golden_name] = calculator.generate_golden_set_stat(stats)
-                print(f"   [SUCCESS] 골든셋 '{golden_name}' 평가 완료.")
+                print(f"\n   [SUCCESS] 골든셋 '{golden_name}' 평가 완료.")
             else:
-                print(f"   [WARN] 골든셋 '{golden_name}' 평가 결과가 비어있습니다. 건너뜁니다.")
+                print(f"\n   [WARN] 골든셋 '{golden_name}' 평가 결과가 비어있습니다. 건너뜁니다.")
         except Exception as e:
             print(f"\n[FATAL ERROR] 골든셋 '{golden_name}' 평가 중 오류 발생: {e}. 건너뜁니다.")
 
@@ -471,7 +469,7 @@ def run_ares_pipeline():
         print(f"\n[WARN] QCA `.jsonl` 파일을 찾을 수 없습니다. 평가를 건너뜁니다.")
         return
 
-    print(f"\n[INFO] 총 {len(input_files)}개의 `.jsonl` 파일을 평가합니다.")
+    print(f"\n[INFO] 평가 대상 파일 갯수 : {len(input_files)}")
 
     total_successful_evals = 0
     full_start_time = time.time()
@@ -559,7 +557,8 @@ def run_ares_pipeline():
         # report_util.generate_summary_report 함수는 이제 golden_markdown_map을 받도록 변경되어야 합니다.
         report_content: str = report_util.generate_summary_report(golden_markdown_map, model_summaries)
         timestamp: str = time.strftime("%Y%m%d_%H%M%S")
-        output_path: str = os.path.join(REPORT_DIR, f"summary_{timestamp}.md")
+        report_filename: str = f"{MODEL_NAME}_{timestamp}.md"
+        output_path: str = os.path.join(REPORT_DIR, report_filename)
 
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(report_content)
