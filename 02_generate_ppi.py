@@ -66,7 +66,8 @@ CI_Z_SCORE: float = float(norm.ppf(1 - CI_ALPHA / 2))  # 약 1.96
 
 # 평가 배치 크기 설정 (클수록 속도 향상, 메모리 사용 증가)
 BATCH_SIZE = 32
-
+#
+ENGINE_TYPE_ONNX_RUNTIME = "ONNX Runtime"
 
 # ===================================================================
 # 1. 유틸리티 함수 (클래스에 포함시키지 않는 범용 기능)
@@ -99,7 +100,7 @@ def cleanup_evaluation_data():
     for target_dir in dirs_to_clean:
         if os.path.isdir(target_dir):
             files_deleted = 0
-            # ... (기존 cleanup_evaluation_data 로직 유지)
+
             for filename in os.listdir(target_dir):
                 file_path = os.path.join(target_dir, filename)
                 try:
@@ -146,20 +147,18 @@ class AresJudge(abc.ABC):
         """
         results: Dict[str, Dict[str, float | int]] = {}
 
-        # 🚨 수정: SBERT/ONNX 모델 키를 포함할 수 있도록 JUDGE_TYPES 리스트를 사용
+        # 각각이 어떤 것을 평가할지 맵핑 관계
         judge_inputs_map = {
             KEY_CR: (query, context),
             KEY_AF: (context, answer),
-            KEY_AR: (query, answer),
-            # 🚨 SBERT/ONNX 모델이 있다면 여기에 추가되어야 함.
-            #     현재 JUDGE_TYPES에 SBERT가 없으므로 BERT 기반 3축만 평가.
+            KEY_AR: (query, answer)
         }
 
         for judge_type in JUDGE_TYPES:
             text_a, text_b = judge_inputs_map[judge_type]
 
             # 1. 토큰화 (NumPy 텐서 또는 PyTorch 텐서)
-            return_tensors = "np" if self.engine_type == "ONNX Runtime" else "pt"
+            return_tensors = "np" if self.engine_type == ENGINE_TYPE_ONNX_RUNTIME else "pt"
 
             tokenized_data = self.tokenizer(
                 text_a, text_b,
@@ -216,7 +215,6 @@ class AresPytorchJudge(AresJudge):
             self.tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
             print(f"[INFO] 기본 모델에서 토크나이저 로드 완료.")
 
-        # TODO
         # DistilBERT 호환: token_type_ids 제거
         if TOKEN_TYPE_ID_OFF and self.tokenizer:
             self.tokenizer.model_input_names = [
@@ -258,7 +256,7 @@ class AresPytorchJudge(AresJudge):
 class AresSbertOnnxJudge(AresJudge):
     """SBERT ONNX Runtime 기반 모델 로딩 및 평가 담당."""
     def __init__(self, device: torch.device,  max_length: int, model_type_name) -> None:
-        super().__init__(device, max_length, model_type_name, "ONNX Runtime")
+        super().__init__(device, max_length, model_type_name, ENGINE_TYPE_ONNX_RUNTIME)
 
     def _get_model_path_base(self, judge_type: str) -> str:
         """모델 폴더 경로를 반환합니다."""
