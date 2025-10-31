@@ -1,5 +1,6 @@
 # 02_generate_ppi.py (클래스 기반 및 다중 골든셋 확장 버전)
 # 1. 표준 라이브러리
+import abc
 import json
 import logging
 import math
@@ -13,6 +14,14 @@ from numpy.typing import NDArray
 import torch
 from scipy.stats import norm
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
+
+# ONNX Runtime 및 Transformers 라이브러리
+from onnxruntime import InferenceSession, SessionOptions
+from transformers import AutoTokenizer
+
+# Transformers 경고 메시지 비활성화
+logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
+logging.getLogger("transformers.modeling_utils").setLevel(logging.ERROR)
 
 # 3. 로컬/애플리케이션 고유 라이브러리
 import config
@@ -55,6 +64,10 @@ CI_ALPHA: float = 0.05  # 95% 신뢰구간
 CI_Z_SCORE: float = float(norm.ppf(1 - CI_ALPHA / 2))  # 약 1.96
 
 
+# 평가 배치 크기 설정 (클수록 속도 향상, 메모리 사용 증가)
+BATCH_SIZE = 32
+
+
 # ===================================================================
 # 1. 유틸리티 함수 (클래스에 포함시키지 않는 범용 기능)
 # ===================================================================
@@ -71,6 +84,8 @@ def _find_model_path(judge_type: str) -> str:
 
     if not os.path.isdir(model_path):
         raise FileNotFoundError(f"모델 폴더를 찾을 수 없습니다: {model_path}")
+
+    print(f"모델 : {judge_type} -> {model_path}")
 
     return model_path
 
@@ -100,32 +115,108 @@ def cleanup_evaluation_data():
 
 
 # ===================================================================
-# 2. ARES 평가 클래스
+# 2. ARES 평가 클래스 (추상화 버전)
 # ===================================================================
-class AresJudge:
-    """ARES 심사관(토크나이저 및 3개 모델) 로딩 및 평가 담당 클래스."""
+class AresJudge(abc.ABC):
+    """모델 로딩 및 평가를 위한 추상 슈퍼 클래스."""
 
-    def __init__(self, device: torch.device = DEVICE, max_length: int = MAX_LENGTH) -> None:
+    def __init__(self, device: torch.device, max_length: int, model_type_name: str, engine_type:str) -> None:
         self.tokenizer: AutoTokenizer | None = None
-        self.judges: Dict[str, AutoModelForSequenceClassification] = {}
+        self.judges: Dict[str, Any] = {}  # PyTorch 모델 또는 ONNX InferenceSession을 담음
         self.device = device
         self.max_length = max_length
+        self.model_type_name = model_type_name
+        self.engine_type: str = engine_type
         self._load_models()
 
+    @abc.abstractmethod
     def _load_models(self) -> None:
-        """CR, AF, AR 세 가지 심사관 모델과 토크나이저 로드."""
-        print("\n>> ARES 심사관 로딩 시작...")
+        """각 서브 클래스에서 엔진에 맞게 모델을 로드하는 필수 메서드."""
+        pass
+
+    @abc.abstractmethod
+    def _get_logits(self, judge_type: str, inputs: Dict[str, Any],
+                    tokenized_data: Dict[str, Any]) -> np.ndarray | torch.Tensor:
+        """엔진 타입에 따라 추론을 실행하고 Logits를 반환하는 필수 메서드."""
+        pass
+
+    def evaluate_triple(self, query: str, context: str, answer: str) -> Dict[str, Dict[str, float | int]]:
+        """
+        하나의 Q-C-A 쌍에 대해 CR, AF, AR 점수(0/1)와 Softmax 확률을 계산하는 공통 로직.
+        """
+        results: Dict[str, Dict[str, float | int]] = {}
+
+        # 🚨 수정: SBERT/ONNX 모델 키를 포함할 수 있도록 JUDGE_TYPES 리스트를 사용
+        judge_inputs_map = {
+            KEY_CR: (query, context),
+            KEY_AF: (context, answer),
+            KEY_AR: (query, answer),
+            # 🚨 SBERT/ONNX 모델이 있다면 여기에 추가되어야 함.
+            #     현재 JUDGE_TYPES에 SBERT가 없으므로 BERT 기반 3축만 평가.
+        }
+
+        for judge_type in JUDGE_TYPES:
+            text_a, text_b = judge_inputs_map[judge_type]
+
+            # 1. 토큰화 (NumPy 텐서 또는 PyTorch 텐서)
+            return_tensors = "np" if self.engine_type == "ONNX Runtime" else "pt"
+
+            tokenized_data = self.tokenizer(
+                text_a, text_b,
+                return_tensors=return_tensors,
+                truncation=True,
+                padding="max_length",
+                max_length=self.max_length,
+            )
+
+            # 2. Logits 계산 (서브 클래스 호출)
+            logits_tensor = self._get_logits(judge_type, tokenized_data, tokenized_data)
+
+            # 3. 결과 산출 (공통 후처리)
+            probabilities = torch.softmax(logits_tensor, dim=1).squeeze().cpu().numpy()
+            prediction = int(torch.argmax(logits_tensor, dim=1).item())
+
+            prob_neg = round(float(probabilities[0]), 4)
+            prob_pos = round(float(probabilities[1]), 4)
+
+            results[JUDGE_PREDICTION_FIELDS[judge_type]] = {
+                'machine_pred': prediction,
+                'prob_neg': prob_neg,
+                'prob_pos': prob_pos
+            }
+
+        return results
+
+
+class AresPytorchJudge(AresJudge):
+    """BERT 및 DistilBERT와 같은 PyTorch 기반 모델 로딩 및 평가 담당."""
+
+    def __init__(self, device, max_length, model_type_name) -> None:
+        super().__init__(device, max_length, model_type_name, "PyTorch")
+
+    def _get_model_path_base(self, judge_type: str) -> str:
+        """모델 폴더 경로를 반환합니다."""
+        target_folder = FOLDER_MAPPING.get(judge_type)
+        if not target_folder: raise ValueError(f"정의되지 않은 심사관 타입: {judge_type}")
+        model_path = os.path.join(MODEL_DIR_BASE, target_folder)
+        if not os.path.isdir(model_path): raise FileNotFoundError(f"모델 폴더를 찾을 수 없습니다: {model_path}")
+        return model_path
+
+    def _load_models(self) -> None:
+        """PyTorch 모델 로딩 로직."""
+        print(f"\n>> ARES 심사관 로딩 시작 ({self.model_type_name} / {self.engine_type} 엔진)...")
 
         # 1. 토크나이저 로드
-        cr_path = _find_model_path(KEY_CR)
+        cr_path = self._get_model_path_base(KEY_CR)
         try:
             self.tokenizer = AutoTokenizer.from_pretrained(cr_path, trust_remote_code=True)
             print(f"[INFO] 토크나이저 로드 성공: {cr_path}")
         except Exception:
-            print(f"[WARN] {cr_path} 에서 실패, 기본 모델({MODEL_NAME}) 로드 시도")
+            print(f"[WARN] 토크나이저 로드 실패. 원본 모델 ({MODEL_NAME}) 로드 시도.")
             self.tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
-            print(f"[INFO] 기본 모델에서 토크나이저 로드 완료")
+            print(f"[INFO] 기본 모델에서 토크나이저 로드 완료.")
 
+        # TODO
         # DistilBERT 호환: token_type_ids 제거
         if TOKEN_TYPE_ID_OFF and self.tokenizer:
             self.tokenizer.model_input_names = [
@@ -133,73 +224,107 @@ class AresJudge:
             ]
             print("[INFO] 'token_type_ids' 비활성화 완료")
 
-        # 2. 모델 로드
+        # 2. PyTorch 모델 로드
         for judge_type in JUDGE_TYPES:
             try:
-                path = _find_model_path(judge_type)
+                model_folder_path = self._get_model_path_base(judge_type)
                 model = AutoModelForSequenceClassification.from_pretrained(
-                    path, num_labels=2, trust_remote_code=True
+                    model_folder_path, num_labels=2, trust_remote_code=True
                 ).to(self.device)
                 model.eval()
                 self.judges[judge_type] = model
-                print(f"[SUCCESS] {judge_type} 모델 로드 완료 ({path})")
+                print(f"[SUCCESS] {judge_type} Judge 로드 완료 ({self.engine_type})")
             except Exception as e:
-                print(f"[ERROR] {judge_type} 모델 로드 실패: {e}")
+                print(f"[ERROR] {judge_type} Judge 로드 실패: {e}")
 
-        if len(self.judges) != 3:
-            raise RuntimeError(
-                f"필요한 모델 3개 중 {len(self.judges)}개만 로드됨 — 모든 심사관 필요."
-            )
+        if len(self.judges) != len(JUDGE_TYPES):
+            raise RuntimeError(f"필요한 PyTorch 모델 {len(JUDGE_TYPES)}개 중 {len(self.judges)}개만 로드됨.")
 
-        print(f">> ARES 심사관 로드 완료. 총 {len(self.judges)}개 모델 활성화.")
+        print(f">> ARES 심사관 로드 완료. 총 {len(self.judges)}개 심사관 활성화.")
 
-
-    def evaluate_triple(self, query: str, context: str, answer: str) -> Dict[str, Dict[str, float | int]]:
-        """
-        하나의 Q-C-A 쌍에 대해 CR, AF, AR 점수(0 또는 1)와 Softmax 확률을 계산합니다.
-
-        반환 형식 변경: { 'contextrelevance': {'machine_pred': 0/1, 'prob_neg': 0.xx, 'prob_pos': 0.yy}, ... }
-        """
-        # 반환 타입이 변경되므로 딕셔너리의 값도 딕셔너리가 됩니다.
-        results: Dict[str, Dict[str, float | int]] = {}
-
-        judge_inputs = {
-            JUDGE_PREDICTION_FIELDS[KEY_CR]: (query, context, self.judges[KEY_CR]),
-            JUDGE_PREDICTION_FIELDS[KEY_AF]: (context, answer, self.judges[KEY_AF]),
-            JUDGE_PREDICTION_FIELDS[KEY_AR]: (query, answer, self.judges[KEY_AR]),
-        }
+    def _get_logits(self, judge_type: str, inputs: Dict[str, Any], tokenized_data: Dict[str, Any]) -> torch.Tensor:
+        """PyTorch 추론 로직: 모델을 실행하고 Logits를 반환."""
+        model = self.judges[judge_type]
 
         with torch.no_grad():
-            for name, (a, b, model) in judge_inputs.items():
-                inputs = self.tokenizer(
-                    a, b,
-                    return_tensors="pt",
-                    truncation=True,
-                    padding="max_length",
-                    max_length=self.max_length,
-                ).to(self.device)
+            # PyTorch 텐서를 GPU/CPU 장치로 이동
+            pt_inputs = {k: v.to(self.device) for k, v in tokenized_data.items()}
+            outputs = model.forward(**pt_inputs)
+            return outputs.logits
 
-                outputs = model.forward(**inputs)
-                logits = outputs.logits
+    # evaluate_triple 메서드는 AresJudge 슈퍼 클래스에서 상속 및 재활용됨
 
-                # 1. Softmax 적용하여 확률 획득
-                probabilities = torch.softmax(logits, dim=1).squeeze().cpu().numpy()
 
-                # 2. 클래스 예측 (argmax)
-                prediction = int(torch.argmax(logits, dim=1).item())
+class AresSbertOnnxJudge(AresJudge):
+    """SBERT ONNX Runtime 기반 모델 로딩 및 평가 담당."""
+    def __init__(self, device: torch.device,  max_length: int, model_type_name) -> None:
+        super().__init__(device, max_length, model_type_name, "ONNX Runtime")
 
-                # 3. 긍정(1) 및 부정(0) 확률 저장 (소수점 4째자리까지 반올림)
-                prob_neg = round(float(probabilities[0]), 4)  # 부정 확률 (Class 0)
-                prob_pos = round(float(probabilities[1]), 4)  # 긍정 확률 (Class 1)
+    def _get_model_path_base(self, judge_type: str) -> str:
+        """모델 폴더 경로를 반환합니다."""
+        target_folder = FOLDER_MAPPING.get(judge_type)
+        if not target_folder: raise ValueError(f"정의되지 않은 심사관 타입: {judge_type}")
+        model_path = os.path.join(MODEL_DIR_BASE, target_folder)
+        if not os.path.isdir(model_path): raise FileNotFoundError(f"폴더를 찾을 수 없습니다: {model_path}")
+        return model_path
 
-                # 4. 결과 딕셔너리에 Softmax 확률과 예측 클래스 모두 저장
-                results[name] = {
-                    'machine_pred': prediction,
-                    'prob_neg': prob_neg,
-                    'prob_pos': prob_pos
-                }
+    def _load_models(self) -> None:
+        """ONNX InferenceSession 로딩 로직."""
+        print(f"\n>> ARES 심사관 로딩 시작 ({self.model_type_name} / {self.engine_type} 엔진)...")
 
-        return results
+        # 1. 토크나이저 로드 (기존 로직 유지)
+        cr_path = self._get_model_path_base(KEY_CR)
+        try:
+            self.tokenizer = AutoTokenizer.from_pretrained(cr_path, trust_remote_code=True)
+            print(f"[INFO] 토크나이저 로드 성공: {cr_path}")
+        except Exception as e:
+            print(f"[WARN] 토크나이저 로드 실패 : {e}. 원본 모델 ({MODEL_NAME}) 로드 시도.")
+            self.tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
+            print(f"[INFO] 기본 모델에서 토크나이저 로드 완료.")
+
+        # 2. ONNX InferenceSession 로드
+        options = SessionOptions()
+        providers = ['CPUExecutionProvider']
+
+        for judge_type in JUDGE_TYPES:
+            try:
+                # model_folder_path는 PyTorch와 동일한 디렉토리 구조를 사용합니다.
+                model_folder_path = self._get_model_path_base(judge_type)
+                # onnx 파일은 모델 폴더에 같이 들어있음
+                quant_model_path = os.path.join(model_folder_path, "model_quant.onnx")
+                if not os.path.exists(quant_model_path):
+                    raise FileNotFoundError(f"ONNX 파일 없음. 존재하지 않는 경로 : {quant_model_path}")
+
+                session = InferenceSession(quant_model_path, sess_options=options, providers=providers)
+                self.judges[judge_type] = session
+                print(f"[SUCCESS] {judge_type} Judge 로드 완료 (ONNX)")
+            except Exception as e:
+                print(f"[ERROR] {judge_type} 로드 실패: {e}")
+
+        if len(self.judges) != len(JUDGE_TYPES):
+            raise RuntimeError(f"필요한 ONNX 모델 {len(JUDGE_TYPES)}개 중 {len(self.judges)}개만 로드됨.")
+
+        print(f">> ARES 심사관 로드 완료. 총 {len(self.judges)}개 심사관 활성화.")
+
+    def _get_logits(self, judge_type: str, inputs: Dict[str, Any], tokenized_data: Dict[str, Any]) -> torch.Tensor:
+        """ONNX 추론 로직: Logits를 NumPy로 얻은 후 PyTorch Tensor로 변환."""
+        session: InferenceSession = self.judges[judge_type]
+
+        # ONNX 추론 (NumPy 텐서 사용)
+        input_names = [input.name for input in session.get_inputs()]
+
+        # tokenized_data (NumPy 배열)에서 ONNX 세션이 필요로 하는 입력만 추출
+        session_input = {
+            name: tokenized_data[name] for name in input_names if name in tokenized_data
+        }
+
+        outputs = session.run(None, session_input)
+        logits_array = outputs[0]
+
+        # Logits를 PyTorch 텐서로 변환하여 슈퍼 클래스의 후처리에 사용
+        return torch.from_numpy(logits_array)
+
+    # evaluate_triple 메서드는 AresJudge 슈퍼 클래스에서 상속 및 재활용됨
 
 
 # ===================================================================
@@ -518,18 +643,22 @@ class PPICalculator:
 # ===================================================================
 # 4. 메인 파이프라인 함수
 # ===================================================================
-# 초기화
 def _load_judges_and_calc() -> Tuple[AresJudge, PPICalculator]:
     """심사관과 계산기 인스턴스를 로드하고 반환합니다."""
-    # 필수 디렉토리 생성은 메인 파이프라인에서 처리합니다.
-    try:
-        judge = AresJudge()
-        calculator = PPICalculator()
-        return judge, calculator
-    except RuntimeError as e:
-        print(f"\n[FATAL ERROR] ARES 심사관 시스템 초기화 실패: {e}")
-        raise
 
+    lower_model_name = MODEL_NAME.lower()
+    if "onnx" in lower_model_name and "sbert" in lower_model_name:
+        # SBERT ONNX 모델인 경우
+        judge = AresSbertOnnxJudge(DEVICE, MAX_LENGTH, model_type_name="SBert-Onnx")
+    elif "distil" in lower_model_name:
+        # DistilBERT 모델인 경우
+        judge = AresPytorchJudge(DEVICE, MAX_LENGTH, model_type_name="DistilBERT")
+    else:
+        # 일반 BERT 모델인 경우
+        judge = AresPytorchJudge(DEVICE, MAX_LENGTH, model_type_name="BERT")
+
+    calculator = PPICalculator()
+    return judge, calculator
 
 # 골든셋 평가
 def _evaluate_golden_sets(judge: AresJudge, calculator: PPICalculator) -> Tuple[Dict, Dict]:
@@ -730,13 +859,13 @@ def run_ares_pipeline():
         print(f"\n[SETUP] 평가대상인 QCA 입력 디렉토리: {config.DATA_IN_DIR}, 보고서 디렉토리: {config.DATA_REPORT_DIR}")
 
         # 1. 초기화 및 골든셋 평가
-        judge, calculator = _load_judges_and_calc()
+        current_judge, calculator = _load_judges_and_calc()
         # 🚨 수정: golden_markdown_map 대신 golden_report_data 변수명 사용
-        golden_stats_map, golden_report_data = _evaluate_golden_sets(judge, calculator)
+        golden_stats_map, golden_report_data = _evaluate_golden_sets(current_judge, calculator)
 
         # 2. 대규모 평가 실행
         model_summaries, total_successful_evals, full_elapsed_time = _process_input_files(
-            judge, calculator, golden_stats_map
+            current_judge, calculator, golden_stats_map
         )
 
         # 3. 보고서 생성 및 최종 요약
