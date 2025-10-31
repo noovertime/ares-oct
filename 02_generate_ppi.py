@@ -12,7 +12,6 @@ import numpy as np
 from numpy.typing import NDArray
 import torch
 from scipy.stats import norm
-from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
 # 3. 로컬/애플리케이션 고유 라이브러리
@@ -274,56 +273,68 @@ class PPICalculator:
             print(f"[WARN] 골든셋 파일 {golden_set_filepath}에 평가할 데이터가 없습니다.")
             return {}
 
-        print(f"\n>> 골든셋 평가 시작. {golden_set_filepath}, 총 {len(golden_records)}개 샘플 심사관 예측 중...")
+        total_samples = len(golden_records)
+        print(f"\n>> 골든셋 평가 시작. {golden_set_filepath}, 총 {total_samples}개 예측 시작 ")
 
-        with tqdm(golden_records, desc="골든셋 심사관 평가 중", leave=False) as pbar:
-            for data in pbar:
-                try:
-                    # Q, C, A 추출 및 정규화
-                    query = ' '.join(data.get('q', '').split()).strip()
-                    context = ' '.join(data.get('c', '').split()).strip()
-                    answer = ' '.join(data.get('a', '').split()).strip()
+        progress_points = [0, 10, 30, 50, 70, 90, 100]
+        next_progress_index = 0
 
-                    if not all([query, context, answer]):
-                        continue
+        print(f"[PROGRESS] 0%. ", end=' ')
 
-                    # 1. LM 심사관 예측 (Yhat_labeled) - 딕셔너리 in 딕셔너리를 반환
-                    scores_with_probs = judge.evaluate_triple(query, context, answer)
+        for i, data in enumerate(golden_records):
+            current_progress = (i * 100) // total_samples
 
-                    # 2. LM 예측값과 인간 주석값 비교
-                    for axis in JUDGE_TYPES:
-                        pred_key = JUDGE_PREDICTION_FIELDS[axis]
-                        axis_scores = scores_with_probs.get(pred_key)
+            # 다음 목표 %에 도달했는지 확인
+            if next_progress_index < len(progress_points) - 1 and current_progress >= progress_points[
+                next_progress_index + 1]:
+                next_progress_index += 1
+                print(f" {progress_points[next_progress_index]}%. ", end=' ')
 
-                        if axis_scores is None: continue
+            try:
+                # Q, C, A 추출 및 정규화
+                query = ' '.join(data.get('q', '').split()).strip()
+                context = ' '.join(data.get('c', '').split()).strip()
+                answer = ' '.join(data.get('a', '').split()).strip()
 
-                        machine_pred = axis_scores.get('machine_pred')
-                        # 🚨 추가: P_pos 확률 추출
-                        prob_pos = axis_scores.get('prob_pos')
-
-                        gold_key = GOLD_LABEL_FIELDS[axis]
-                        gold_label = data.get(gold_key)
-
-                        if machine_pred is None or prob_pos is None or gold_label is None:
-                            continue
-
-                        # 통계 업데이트
-                        machine_pred = int(machine_pred)
-                        gold_label = int(gold_label)
-
-                        rectifier_term = float(machine_pred - gold_label)
-
-                        stats = golden_stats[axis]
-                        stats['labeled_n'] += 1
-                        stats['rectifier_terms'].append(rectifier_term)
-                        stats['machine_mean_sum'] += machine_pred
-                        # 🚨 추가: P_pos 리스트에 저장
-                        stats['prob_pos_list'].append(prob_pos)
-
-                except Exception:
+                if not all([query, context, answer]):
                     continue
 
-        print()
+                scores_with_probs = judge.evaluate_triple(query, context, answer)
+
+                for axis in JUDGE_TYPES:
+                    pred_key = JUDGE_PREDICTION_FIELDS[axis]
+                    axis_scores = scores_with_probs.get(pred_key)
+
+                    if axis_scores is None: continue
+
+                    machine_pred = axis_scores.get('machine_pred')
+                    prob_pos = axis_scores.get('prob_pos')
+
+                    gold_key = GOLD_LABEL_FIELDS[axis]
+                    gold_label = data.get(gold_key)
+
+                    if machine_pred is None or prob_pos is None or gold_label is None:
+                        continue
+
+                    # 통계 업데이트
+                    machine_pred = int(machine_pred)
+                    gold_label = int(gold_label)
+
+                    rectifier_term = float(machine_pred - gold_label)
+
+                    stats = golden_stats[axis]
+                    stats['labeled_n'] += 1
+                    stats['rectifier_terms'].append(rectifier_term)
+                    stats['machine_mean_sum'] += machine_pred
+                    stats['prob_pos_list'].append(prob_pos)
+
+            except Exception as e:
+                print(f"[예외] {e}")
+                continue
+
+        # 100% 완료 로그 출력 (루프 내에서 이미 출력되었을 수 있으나, 안전장치)
+        if total_samples > 0:
+            print(f"100% 완료.")
 
         # 3. 최종 통계 계산
         final_golden_stats = {}
@@ -333,11 +344,11 @@ class PPICalculator:
                     'labeled_n': stats['labeled_n'],
                     'rectifier_terms': stats['rectifier_terms'],
                     'machine_mean': stats['machine_mean_sum'] / stats['labeled_n'],
-                    # 🚨 추가: P_pos 리스트를 최종 통계에 포함
                     'prob_pos_list': stats['prob_pos_list']
                 }
 
         return final_golden_stats
+
 
     def calculate_ppi_asymptotic_ci(
             self,
@@ -559,8 +570,7 @@ def _evaluate_golden_sets(judge: AresJudge, calculator: PPICalculator) -> Tuple[
                 report_data = calculator.generate_golden_set_stat(stats)
                 golden_report_data[golden_name] = report_data
 
-                print() # 성공 로그 앞에 줄바꿈을 명시적으로 추가하여 이전 tqdm 줄을 정리
-                print(f"\n   [SUCCESS] 골든셋 '{golden_name}' 평가 완료.")
+                print(f"[SUCCESS] 골든셋 '{golden_name}' 평가 완료.")
             else:
                 print(f"\n   [WARN] 골든셋 '{golden_name}' 평가 결과가 비어있습니다. 건너뜁니다.")
         except Exception as e:
@@ -599,8 +609,8 @@ def _process_input_files(judge: AresJudge, calculator: PPICalculator, golden_sta
         start_time = time.time()
         file_base_name = os.path.basename(file_path).replace('.jsonl', '')
 
-        # QCA 평가 (Judge)는 한 번만 수행
-        print(f"\n--- 대규모 평가 시작: {file_base_name} ---")
+        # QCA 평가 (Judge)는 파일 당 한 번만 수행
+        print(f"\n--- 평가 시작: {file_base_name} ---")
         current_lm_scores = {k: [] for k in JUDGE_TYPES}
         current_lm_probs = {k: [] for k in JUDGE_TYPES}  # 🚨 수정: Softmax 긍정 확률 집계용
         # all_results_for_file = [] # 저장 로직 비활성화 시 불필요
@@ -608,7 +618,22 @@ def _process_input_files(judge: AresJudge, calculator: PPICalculator, golden_sta
 
         with open(file_path, 'r', encoding='utf-8') as f:
             lines = f.readlines()
-            for line in tqdm(lines, desc=f"평가 중 [{file_base_name}]"):
+
+            total_samples = len(lines)
+            progress_points = [0, 10, 30, 50, 70, 90, 100]
+            next_progress_index = 0
+
+            if total_samples > 0:
+                print(f"[PROGRESS] 0%. ", end=' ')
+
+            for i, line in enumerate(lines):
+                current_progress = (i * 100) // total_samples
+
+                if next_progress_index < len(progress_points) - 1 and current_progress >= progress_points[
+                    next_progress_index + 1]:
+                    next_progress_index += 1
+                    print(f"{progress_points[next_progress_index]}%  ", end=' ')
+
                 try:
                     data = json.loads(line.strip())
                     query = ' '.join(data.get('q', '').split()).strip()
@@ -619,18 +644,13 @@ def _process_input_files(judge: AresJudge, calculator: PPICalculator, golden_sta
 
                     scores_with_probs = judge.evaluate_triple(query, context, answer)
 
-                    # all_results_for_file.append({**data, **scores_with_probs}) # 저장 비활성화
-
                     for axis in JUDGE_TYPES:
                         pred_key = JUDGE_PREDICTION_FIELDS[axis]
                         axis_scores = scores_with_probs.get(pred_key)
 
                         if axis_scores is None: continue
 
-                        # 예측 클래스 (Yhat) 저장 (PPI 보정용)
                         current_lm_scores[axis].append(axis_scores.get('machine_pred', 0))
-
-                        # 🚨 수정: 긍정 확률 (P_pos) 저장 (확신도 계산용)
                         current_lm_probs[axis].append(axis_scores.get('prob_pos', 0.0))
 
                     total_successful_evals += 1
@@ -640,28 +660,31 @@ def _process_input_files(judge: AresJudge, calculator: PPICalculator, golden_sta
                     print(f"[ERROR] 평가 중 예외발생 : {e}")
                     continue
 
-        end_time = time.time()
-        print(f"[INFO] 평가 소요시간 : {end_time - start_time:,.2f}초 ")
+            if processed_count_in_file > 0:
+                print(f"100% 완료.")  # 100% 완료 명시
 
-        # 2-3. 평가셋당 모든 골든셋에 대해 PPI 통계 계산 및 집계
-        if processed_count_in_file > 0:
-            for golden_name, golden_stats in golden_stats_map.items():
-                summary = calculator.calculate_ppi_summary(
-                    file_base_name,
-                    current_lm_scores,
-                    current_lm_probs,  # 🚨 수정: 확률 데이터 전달
-                    processed_count_in_file,
-                    golden_stats,
-                    golden_name
-                )
-                model_summaries.append(summary)
+            end_time = time.time()
+            print(f"[INFO] 평가 소요시간 : {end_time - start_time:,.2f}초 ")
 
-            print(f"   [집계 완료] '{file_base_name}' 결과 집계 완료. (모든 {len(golden_stats_map)}개 골든셋 적용)")
-        else:
-            print(f"   [ERROR] 심사관의 평가 결과 없음 - 파일: {file_base_name}")
+            # 2-3. 평가셋당 모든 골든셋에 대해 PPI 통계 계산 및 집계
+            if processed_count_in_file > 0:
+                for golden_name, golden_stats in golden_stats_map.items():
+                    summary = calculator.calculate_ppi_summary(
+                        file_base_name,
+                        current_lm_scores,
+                        current_lm_probs,
+                        processed_count_in_file,
+                        golden_stats,
+                        golden_name
+                    )
+                    model_summaries.append(summary)
 
-    full_elapsed_time = time.time() - full_start_time
-    return model_summaries, total_successful_evals, full_elapsed_time
+                print(f"[집계 완료] '{file_base_name}' 결과 집계 완료. ({len(golden_stats_map)}개 골든셋 적용)")
+            else:
+                print(f"[ERROR] 심사관의 평가 결과 없음 - 파일: {file_base_name}")
+
+        full_elapsed_time = time.time() - full_start_time
+        return model_summaries, total_successful_evals, full_elapsed_time
 
 
 # 보고서 및 요약
