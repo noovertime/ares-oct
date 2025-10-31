@@ -103,86 +103,102 @@ def cleanup_evaluation_data():
 # ===================================================================
 # 2. ARES 평가 클래스
 # ===================================================================
-
 class AresJudge:
-    """ARES 심사관(토크나이저 및 3개 모델) 로딩 및 평가를 담당하는 클래스."""
+    """ARES 심사관(토크나이저 및 3개 모델) 로딩 및 평가 담당 클래스."""
 
-    def __init__(self, device: torch.device = DEVICE, max_length: int = MAX_LENGTH):
-        self.tokenizer: AutoTokenizer = None
+    def __init__(self, device: torch.device = DEVICE, max_length: int = MAX_LENGTH) -> None:
+        self.tokenizer: AutoTokenizer | None = None
         self.judges: Dict[str, AutoModelForSequenceClassification] = {}
         self.device = device
         self.max_length = max_length
         self._load_models()
 
-    def _load_models(self):
-        """CR, AF, AR 세 가지 심사관 모델과 토크나이저를 로드합니다."""
-        print("\n>> ARES 심사관 로딩 시작 (CPU 환경)...")
+    def _load_models(self) -> None:
+        """CR, AF, AR 세 가지 심사관 모델과 토크나이저 로드."""
+        print("\n>> ARES 심사관 로딩 시작...")
 
-        # 1. 토크나이저 초기화
+        # 1. 토크나이저 로드
+        cr_path = _find_model_path(KEY_CR)
         try:
-            cr_path = _find_model_path(KEY_CR)
             self.tokenizer = AutoTokenizer.from_pretrained(cr_path, trust_remote_code=True)
-            print(f"   [INFO] {cr_path} 에서 토크나이저 로드 성공.")
-        except Exception as e:
-            print(f"   [WARN] 저장 경로에서 토크나이저 로드 실패. 원본 모델 ({MODEL_NAME}) 로드 시도.")
-            try:
-                self.tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
-            except Exception as fallback_e:
-                print(f"   [FATAL] 토크나이저 로드 최종 실패: {fallback_e}")
-                raise fallback_e
+            print(f"[INFO] 토크나이저 로드 성공: {cr_path}")
+        except Exception:
+            print(f"[WARN] {cr_path} 에서 실패, 기본 모델({MODEL_NAME}) 로드 시도")
+            self.tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
+            print(f"[INFO] 기본 모델에서 토크나이저 로드 완료")
 
-        if TOKEN_TYPE_ID_OFF:
+        # DistilBERT 호환: token_type_ids 제거
+        if TOKEN_TYPE_ID_OFF and self.tokenizer:
             self.tokenizer.model_input_names = [
-                name for name in self.tokenizer.model_input_names if name != 'token_type_ids'
+                n for n in self.tokenizer.model_input_names if n != "token_type_ids"
             ]
-            print("   [INFO] DistilBERT 호환성을 위해 토크나이저의 'token_type_ids' 생성을 비활성화했습니다.")
+            print("[INFO] 'token_type_ids' 비활성화 완료")
 
-        # 2. 모델 로드 (AutoModelForSequenceClassification 사용)
+        # 2. 모델 로드
         for judge_type in JUDGE_TYPES:
             try:
-                model_path = _find_model_path(judge_type)
+                path = _find_model_path(judge_type)
                 model = AutoModelForSequenceClassification.from_pretrained(
-                    model_path, num_labels=2, trust_remote_code=True
-                )
-                model.to(self.device)
+                    path, num_labels=2, trust_remote_code=True
+                ).to(self.device)
                 model.eval()
                 self.judges[judge_type] = model
-                print(f"   [SUCCESS] {judge_type} Judge 로드 완료 ( {model_path} )")
-
+                print(f"[SUCCESS] {judge_type} 모델 로드 완료 ({path})")
             except Exception as e:
-                print(f"   [ERROR] {judge_type} Judge 로드 실패: {e}. 이 모델은 건너뜁니다.")
+                print(f"[ERROR] {judge_type} 모델 로드 실패: {e}")
 
         if len(self.judges) != 3:
-            raise RuntimeError(f"총 {len(self.judges)}개만 로드됨. ARES 평가를 위해 3개 모델이 모두 필요합니다.")
+            raise RuntimeError(
+                f"필요한 모델 3개 중 {len(self.judges)}개만 로드됨 — 모든 심사관 필요."
+            )
 
-        print(f">> ARES 심사관 {MODEL_NAME} 로드 완료. 총 {len(self.judges)}개 심사관 활성화.")
+        print(f">> ARES 심사관 로드 완료. 총 {len(self.judges)}개 모델 활성화.")
 
-    def evaluate_triple(self, query: str, context: str, answer: str) -> Dict[str, int]:
-        """하나의 Q-C-A 쌍에 대해 3가지 ARES 점수 (0 또는 1)를 계산합니다."""
 
-        results = {}
+    def evaluate_triple(self, query: str, context: str, answer: str) -> Dict[str, Dict[str, float | int]]:
+        """
+        하나의 Q-C-A 쌍에 대해 CR, AF, AR 점수(0 또는 1)와 Softmax 확률을 계산합니다.
+
+        반환 형식 변경: { 'contextrelevance': {'machine_pred': 0/1, 'prob_neg': 0.xx, 'prob_pos': 0.yy}, ... }
+        """
+        # 반환 타입이 변경되므로 딕셔너리의 값도 딕셔너리가 됩니다.
+        results: Dict[str, Dict[str, float | int]] = {}
 
         judge_inputs = {
             JUDGE_PREDICTION_FIELDS[KEY_CR]: (query, context, self.judges[KEY_CR]),
             JUDGE_PREDICTION_FIELDS[KEY_AF]: (context, answer, self.judges[KEY_AF]),
-            JUDGE_PREDICTION_FIELDS[KEY_AR]: (query, answer, self.judges[KEY_AR])
+            JUDGE_PREDICTION_FIELDS[KEY_AR]: (query, answer, self.judges[KEY_AR]),
         }
 
         with torch.no_grad():
-            for name, (text_a, text_b, model) in judge_inputs.items():
-                # 1. 입력 토큰화
+            for name, (a, b, model) in judge_inputs.items():
                 inputs = self.tokenizer(
-                    text_a, text_b,
+                    a, b,
                     return_tensors="pt",
                     truncation=True,
-                    padding='max_length',
-                    max_length=self.max_length
+                    padding="max_length",
+                    max_length=self.max_length,
                 ).to(self.device)
 
-                # 2. 예측 수행 및 결과 산출
-                outputs = model(**inputs)
-                prediction = torch.argmax(outputs.logits, dim=1).item()
-                results[name] = prediction
+                outputs = model.forward(**inputs)
+                logits = outputs.logits
+
+                # 1. Softmax 적용하여 확률 획득
+                probabilities = torch.softmax(logits, dim=1).squeeze().cpu().numpy()
+
+                # 2. 클래스 예측 (argmax)
+                prediction = int(torch.argmax(logits, dim=1).item())
+
+                # 3. 긍정(1) 및 부정(0) 확률 저장 (소수점 4째자리까지 반올림)
+                prob_neg = round(float(probabilities[0]), 4)  # 부정 확률 (Class 0)
+                prob_pos = round(float(probabilities[1]), 4)  # 긍정 확률 (Class 1)
+
+                # 4. 결과 딕셔너리에 Softmax 확률과 예측 클래스 모두 저장
+                results[name] = {
+                    'machine_pred': prediction,
+                    'prob_neg': prob_neg,
+                    'prob_pos': prob_pos
+                }
 
         return results
 
@@ -242,9 +258,9 @@ class PPICalculator:
     def evaluate_golden_set(self, judge: AresJudge, golden_set_filepath: str) -> Dict[str, Dict[str, Any]]:
         """
         특정 골든셋 파일을 심사관이 평가하고, PPI 편향 계산에 필요한 통계 정보를 반환합니다.
-        (기존의 load_gold_labels_map 로직은 이 함수에 통합되어 ID 기반 매칭 없이 직접 평가)
         """
         golden_stats = {key: {'labeled_n': 0, 'rectifier_terms': [], 'machine_mean_sum': 0.0} for key in JUDGE_TYPES}
+        # 외부 모듈의 _load_json_lines 함수 사용 가정
         golden_records = _load_json_lines(golden_set_filepath)
 
         if not golden_records:
@@ -253,7 +269,10 @@ class PPICalculator:
 
         print(f"\n>> 골든셋 평가 시작. {golden_set_filepath}, 총 {len(golden_records)}개 샘플 심사관 예측 중...")
 
-        for data in tqdm(golden_records, desc="골든셋 심사관 평가 중"):
+        # 🚨 수정: pbar 객체 할당 및 명시적 제어
+        pbar = tqdm(golden_records, desc="골든셋 심사관 평가 중")
+
+        for data in pbar:
             try:
                 # Q, C, A 추출 및 정규화
                 query = ' '.join(data.get('q', '').split()).strip()
@@ -263,12 +282,19 @@ class PPICalculator:
                 if not all([query, context, answer]):
                     continue
 
-                # 1. LM 심사관 예측 (Yhat_labeled)
-                scores = judge.evaluate_triple(query, context, answer)
+                # 1. LM 심사관 예측 (Yhat_labeled) - 딕셔너리 in 딕셔너리를 반환
+                scores_with_probs = judge.evaluate_triple(query, context, answer)
 
-                # 2. LM 예측값과 인간 주석값 비교 (Y_labeled는 골든셋 파일에서 직접 추출)
+                # 2. LM 예측값과 인간 주석값 비교
                 for axis in JUDGE_TYPES:
-                    machine_pred = scores.get(JUDGE_PREDICTION_FIELDS[axis])
+                    pred_key = JUDGE_PREDICTION_FIELDS[axis]
+                    axis_scores = scores_with_probs.get(pred_key)
+
+                    if axis_scores is None: continue
+
+                    # AresJudge.evaluate_triple 변경 사항 반영: 'machine_pred' 키에서 예측 클래스 추출
+                    machine_pred = axis_scores.get('machine_pred')
+
                     gold_key = GOLD_LABEL_FIELDS[axis]
                     gold_label = data.get(gold_key)
 
@@ -289,6 +315,10 @@ class PPICalculator:
             except Exception:
                 continue
 
+        # 🚨 수정: tqdm 명시적 종료 및 다음 로그를 위한 줄바꿈 추가
+        pbar.close()
+        print()  # 다음 로그가 겹치지 않도록 강제 줄바꿈
+
         # 3. 최종 통계 계산
         final_golden_stats = {}
         for axis, stats in golden_stats.items():
@@ -300,6 +330,7 @@ class PPICalculator:
                 }
 
         return final_golden_stats
+
 
     def calculate_ppi_asymptotic_ci(
             self,
@@ -397,36 +428,32 @@ class PPICalculator:
 # ===================================================================
 # 4. 메인 파이프라인 함수
 # ===================================================================
-
-def run_ares_pipeline():
-    """
-    ARES 전체 파이프라인 실행: 다중 골든셋 처리 및 LM 예측 파일 생성/보고서 생성.
-    """
-
-    # --- 1. 환경 설정 및 초기화 단계 ---
-    INPUT_DIR = config.DATA_IN_DIR
-    REPORT_DIR = config.DATA_REPORT_DIR
-    GOLDEN_DIR = config.DATA_GOLDEN_DIR
-
-    os.makedirs(INPUT_DIR, exist_ok=True)
-    os.makedirs(REPORT_DIR, exist_ok=True)
-    print(f"\n[SETUP] 평가대상인 QCA 입력 디렉토리: {INPUT_DIR}")
-
-    # 클래스 인스턴스 생성
+# 초기화
+def _load_judges_and_calc() -> Tuple[AresJudge, PPICalculator]:
+    """심사관과 계산기 인스턴스를 로드하고 반환합니다."""
+    # 필수 디렉토리 생성은 메인 파이프라인에서 처리합니다.
     try:
         judge = AresJudge()
         calculator = PPICalculator()
+        return judge, calculator
     except RuntimeError as e:
         print(f"\n[FATAL ERROR] ARES 심사관 시스템 초기화 실패: {e}")
-        return
+        raise
 
-    # 1-2. 골든 라벨 파일 검색 (다중 골든셋을 처리하도록 확장)
-    # 결과: golden_files = [ ('golden_set_name_1', '/path/to/file1.jsonl'), ... ]
+
+# 골든셋 평가
+def _evaluate_golden_sets(judge: AresJudge, calculator: PPICalculator) -> Tuple[Dict, Dict]:
+    """
+    골든셋 디렉토리를 탐색하고, 각 골든셋을 평가하여 통계 맵을 반환합니다.
+    (골든셋 통계가 없으면 Fatal Error 발생)
+    """
+    GOLDEN_DIR = config.DATA_GOLDEN_DIR
+
+    # 1. 골든 라벨 파일 검색 (다중 골든셋을 처리하도록 확장)
     golden_files: List[Tuple[str, str]] = []
     if os.path.isdir(GOLDEN_DIR):
         for filename in os.listdir(GOLDEN_DIR):
             if filename.endswith('.jsonl'):
-                # 파일명을 골든셋 이름으로 사용합니다 (확장자 제거)
                 golden_name = filename.replace('.jsonl', '')
                 file_path = os.path.join(GOLDEN_DIR, filename)
                 golden_files.append((golden_name, file_path))
@@ -436,11 +463,9 @@ def run_ares_pipeline():
         print(f"\n[WARN] 골든셋 디렉토리 '{GOLDEN_DIR}'가 존재하지 않습니다.")
 
     if not golden_files:
-        print("\n[FATAL ERROR] PPI 보정을 위한 골든 라벨 파일이 없습니다. 파이프라인을 중단합니다.")
-        return
+        raise RuntimeError("PPI 보정을 위한 골든 라벨 파일이 없습니다.")
 
-    # 1-3. 모든 골든셋 평가 및 통계 저장 (메모리 처리)
-    # golden_stats_map: { 'golden_set_name': { 'KEY_CR': { stats } }, ... }
+    # 2. 모든 골든셋 평가 및 통계 저장 (메모리 처리)
     golden_stats_map: Dict[str, Dict[str, Dict[str, Any]]] = {}
     golden_markdown_map: Dict[str, str] = {}
 
@@ -457,35 +482,41 @@ def run_ares_pipeline():
             print(f"\n[FATAL ERROR] 골든셋 '{golden_name}' 평가 중 오류 발생: {e}. 건너뜁니다.")
 
     if not golden_stats_map:
-        print("\n[FATAL ERROR] PPI 보정을 위한 유효한 골든 라벨 데이터 평가 실패. 파이프라인을 중단합니다.")
-        return
+        raise RuntimeError("PPI 보정을 위한 유효한 골든 라벨 데이터 평가 실패.")
 
-    # --- 2. 입력 파일 검색 및 LM 예측 생성 루프 단계 (다중 골든셋으로 확장됨) ---
+    return golden_stats_map, golden_markdown_map
+
+
+# 대규모 평가 루프
+def _process_input_files(judge: AresJudge, calculator: PPICalculator, golden_stats_map: Dict) -> Tuple[
+    List, int, float]:
+    """
+    입력 파일을 순회하며 LM 예측을 수행하고, PPI 보정을 적용하여 model_summaries를 반환합니다.
+    """
+    INPUT_DIR = config.DATA_IN_DIR
     input_files = [
         os.path.join(INPUT_DIR, f) for f in os.listdir(INPUT_DIR) if f.endswith('.jsonl')
     ]
 
     if not input_files:
         print(f"\n[WARN] QCA `.jsonl` 파일을 찾을 수 없습니다. 평가를 건너뜁니다.")
-        return
+        return [], 0, 0.0
 
     print(f"\n[INFO] 평가 대상 파일 갯수 : {len(input_files)}")
 
     total_successful_evals = 0
-    full_start_time = time.time()
-
-    # 최종 보고서에 들어갈 요약 리스트 (다중 골든셋 * 다중 평가셋 조합)
     model_summaries: List[Dict[str, Any]] = []
+    full_start_time = time.time()
 
     # 2-2. 파일별 평가, LM 예측 파일 생성 및 결과 집계
     for file_path in input_files:
-        start_time = time.time()  # 파일별 시간 측정 시작
+        start_time = time.time()
         file_base_name = os.path.basename(file_path).replace('.jsonl', '')
 
         # QCA 평가 (Judge)는 한 번만 수행
         print(f"\n--- 대규모 평가 시작: {file_base_name} ---")
         current_lm_scores = {k: [] for k in JUDGE_TYPES}
-        all_results_for_file = []  # 예측 결과를 JSONL 파일로 출력할 경우를 대비하여 유지
+        # all_results_for_file = [] # 저장 로직 비활성화 시 불필요
         processed_count_in_file = 0
 
         with open(file_path, 'r', encoding='utf-8') as f:
@@ -499,16 +530,18 @@ def run_ares_pipeline():
 
                     if not all([query, context, answer]): continue
 
-                    # ARES 심사관 예측 수행 (Yhat_unlabeled 생성)
-                    scores = judge.evaluate_triple(query, context, answer)
-                    data.update(scores)
+                    scores_with_probs = judge.evaluate_triple(query, context, answer)
 
-                    # LM 예측 결과를 현재 파일의 집계 리스트에 추가
+                    # all_results_for_file.append({**data, **scores_with_probs}) # 저장 비활성화
+
                     for axis in JUDGE_TYPES:
                         pred_key = JUDGE_PREDICTION_FIELDS[axis]
-                        current_lm_scores[axis].append(scores.get(pred_key, 0))
+                        axis_scores = scores_with_probs.get(pred_key)
 
-                    all_results_for_file.append(data)
+                        if axis_scores is None: continue
+
+                        current_lm_scores[axis].append(axis_scores.get('machine_pred', 0))
+
                     total_successful_evals += 1
                     processed_count_in_file += 1
 
@@ -527,36 +560,36 @@ def run_ares_pipeline():
                     current_lm_scores,
                     processed_count_in_file,
                     golden_stats,
-                    golden_name  # 골든셋 이름 전달
+                    golden_name
                 )
                 model_summaries.append(summary)
 
             print(f"   [집계 완료] '{file_base_name}' 결과 집계 완료. (모든 {len(golden_stats_map)}개 골든셋 적용)")
-
-            # --- LM 예측 파일 (Yhat_unlabeled) 저장 로직 (필요하다면 활성화) ---
-            # output_filename = f"{file_base_name}_lm_preds.jsonl"
-            # output_path = os.path.join(OUTPUT_DIR, output_filename)
-            # with open(output_path, 'w', encoding='utf-8') as outfile:
-            #     for result in all_results_for_file:
-            #         outfile.write(json.dumps(result, ensure_ascii=False) + '\n')
-            # print(f"   [SUCCESS] LM 예측 결과 저장 완료 → {output_path}")
-
         else:
             print(f"   [ERROR] 심사관의 평가 결과 없음 - 파일: {file_base_name}")
 
-    # --- 3. 최종 보고서 생성 단계 ---
-    full_end_time = time.time()
-    full_elapsed_time = full_end_time - full_start_time
+    full_elapsed_time = time.time() - full_start_time
+    return model_summaries, total_successful_evals, full_elapsed_time
 
-    # --- 3. 최종 보고서 생성 단계 ---
-    # 🚨 디버깅을 위해 이 부분의 출력 결과를 알려주세요.
-    print(f"\n[DEBUG] Model Summaries 첫 번째 요소: {model_summaries[0]}")
 
-    # 최종 보고서 생성
+# 보고서 및 요약
+def _generate_report_and_summary(golden_markdown_map: Dict, model_summaries: List, total_successful_evals: int,
+                                 full_elapsed_time: float) -> None:
+    """
+    최종 보고서를 생성하고 콘솔에 실행 요약을 출력합니다.
+    """
+    REPORT_DIR = config.DATA_REPORT_DIR
+    MODEL_NAME = config.MODEL_NAME
+
+    # 🚨 디버깅을 위해 이 부분의 출력 결과를 알려주세요. (주석 처리 또는 제거 가능)
     if model_summaries:
-        # report_util.generate_summary_report 함수는 이제 golden_markdown_map을 받도록 변경되어야 합니다.
+        print(f"\n[DEBUG] Model Summaries 첫 번째 요소: {model_summaries[0]}")
+
+    if model_summaries:
         report_content: str = report_util.generate_summary_report(golden_markdown_map, model_summaries)
         timestamp: str = time.strftime("%Y%m%d_%H%M%S")
+
+        # 파일명 수정 반영
         report_filename: str = f"{MODEL_NAME}_{timestamp}.md"
         output_path: str = os.path.join(REPORT_DIR, report_filename)
 
@@ -571,5 +604,35 @@ def run_ares_pipeline():
     print("==================================================")
 
 
+
+# 실행
+def run_ares_pipeline():
+    """
+    ARES 전체 파이프라인 실행을 관리하는 메인 함수.
+    """
+    try:
+        # 0. 환경 설정
+        os.makedirs(config.DATA_IN_DIR, exist_ok=True)
+        os.makedirs(config.DATA_REPORT_DIR, exist_ok=True)
+        print(f"\n[SETUP] 평가대상인 QCA 입력 디렉토리: {config.DATA_IN_DIR}, 보고서 디렉토리: {config.DATA_REPORT_DIR}")
+
+        # 1. 초기화 및 골든셋 평가
+        judge, calculator = _load_judges_and_calc()
+        golden_stats_map, golden_markdown_map = _evaluate_golden_sets(judge, calculator)
+
+        # 2. 대규모 평가 실행
+        model_summaries, total_successful_evals, full_elapsed_time = _process_input_files(
+            judge, calculator, golden_stats_map
+        )
+
+        # 3. 보고서 생성 및 최종 요약
+        _generate_report_and_summary(golden_markdown_map, model_summaries, total_successful_evals, full_elapsed_time)
+
+    except RuntimeError as e:
+        print(f"\n[FATAL ERROR] 파이프라인 실행 중 치명적인 오류 발생: {e}")
+        return
+
+
 if __name__ == "__main__":
     run_ares_pipeline()
+
