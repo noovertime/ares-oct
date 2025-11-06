@@ -811,7 +811,8 @@ def _process_input_files(judge: AresJudge, calculator: PPICalculator, golden_sta
                 print(f"[ERROR] 심사관의 평가 결과 없음 - 파일: {file_base_name}")
 
         full_elapsed_time = time.time() - full_start_time
-        return model_summaries, total_successful_evals, full_elapsed_time
+
+    return model_summaries, total_successful_evals, full_elapsed_time
 
 
 # 보고서 및 요약
