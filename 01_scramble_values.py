@@ -31,10 +31,12 @@ class ExtractType(Enum):
     BALANCE = 1  # 긍정:부정 = 50:50
     POSITIVE = 2  # 긍정 최대화 (부정 최소 10% 보장)
     NEGATIVE = 3  # 부정 최대화 (긍정 최소 0%~5%만 포함 가능성 있음)
+    ALL_POSITIVE = 4  # L_CR, L_AF, L_AR이 모두 1인 값만 추출
+    ALL_NEGATIVE = 5  # L_CR, L_AF, L_AR이 모두 0인 값만 추출
 
 
 # 추출 스타일
-EXTRACT_STYLE = ExtractType.BALANCE
+EXTRACT_STYLE = ExtractType.ALL_NEGATIVE
 # 추출 비율
 GOLDEN_RATIO = 0.05
 EXTRACT_RATIO = 0.50  # RAG 샘플 추출 비율을 50%로 상향 조정
@@ -42,10 +44,10 @@ MIN_GOLDEN_COUNT = 100  # 골든셋 최소 확보 목표
 MIN_NEGATIVE_RATIO_POS = 0.10  # POSITIVE 스타일에서 최소 부정 비율
 
 # 오답 생성비율
-SWAP_A_MIN_RATE = 0.10
-SWAP_A_MAX_RATE = 0.10
-SWAP_C_MIN_RATE = 0.20
-SWAP_C_MAX_RATE = 0.20
+SWAP_A_MIN_RATE = 0.0
+SWAP_A_MAX_RATE = 0.0
+SWAP_C_MIN_RATE = 0.0
+SWAP_C_MAX_RATE = 0.0
 
 # README 파일 이름 상수화
 README_GOLDEN_FILE = "README_golden.txt"
@@ -260,23 +262,45 @@ def calculate_sample_counts(rag_target_size: int, categorized_data: Dict[str, Li
     pos_count = len(categorized_data['positive'])
     neg_total_count = sum(len(v) for k, v in categorized_data.items() if k.startswith('neg'))
 
+    # ALL_NEGATIVE는 L_CR=0, L_AF=0, L_AR=0 인 경우만 추출하므로 neg_type_3 개수만 사용합니다.
+    neg_type_3_count = len(categorized_data['neg_type_3'])
+
     if EXTRACT_STYLE == ExtractType.BALANCE:
         target_pos = min(rag_target_size // 2, pos_count)
         target_neg = min(rag_target_size - target_pos, neg_total_count)
-        target_neg = min(rag_target_size - target_pos, neg_total_count)  # 보정
+
     elif EXTRACT_STYLE == ExtractType.POSITIVE:
         min_neg_count = max(1, math.floor(rag_target_size * MIN_NEGATIVE_RATIO_POS))
         target_neg = min(min_neg_count, neg_total_count)
         target_pos = min(rag_target_size - target_neg, pos_count)
-        target_neg = min(rag_target_size - target_pos, neg_total_count)  # 보정
+
     elif EXTRACT_STYLE == ExtractType.NEGATIVE:
         target_neg = min(rag_target_size, neg_total_count)
         target_pos = min(rag_target_size - target_neg, pos_count)
-        target_pos = min(rag_target_size - target_neg, pos_count)  # 보정
+
+    # --- 새로 추가된 스타일 ---
+    elif EXTRACT_STYLE == ExtractType.ALL_POSITIVE:
+        target_pos = min(rag_target_size, pos_count)  # 긍정 최대화
+        target_neg = 0  # 부정 0
+
+    elif EXTRACT_STYLE == ExtractType.ALL_NEGATIVE:
+        target_neg = min(rag_target_size, neg_type_3_count)  # L_CR=0, L_AF=0, L_AR=0인 데이터로만 부정 최대화
+        target_pos = 0  # 긍정 0
+    # -------------------------
+
     else:
+        # 정의되지 않은 스타일의 경우 기본값(BALANCE)으로 폴백
         return calculate_sample_counts(rag_target_size, categorized_data)
 
-    return target_pos, target_neg
+        # 최종적으로 target_pos와 target_neg의 합이 rag_target_size를 초과하지 않도록 보정
+    if target_pos + target_neg > rag_target_size:
+        if EXTRACT_STYLE in [ExtractType.ALL_POSITIVE, ExtractType.POSITIVE, ExtractType.BALANCE]:
+            # 긍정 스타일 우선: 목표 크기에 맞춰 부정 개수를 줄임
+            target_neg = rag_target_size - target_pos
+        else:  # NEGATIVE, ALL_NEGATIVE 스타일 우선: 목표 크기에 맞춰 긍정 개수를 줄임
+            target_pos = rag_target_size - target_neg
+
+    return max(0, target_pos), max(0, target_neg)
 
 
 def sample_negative_data(target_neg: int, categorized_data: Dict[str, List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
